@@ -1,0 +1,148 @@
+/*==============================================================================
+MIT License
+
+Copyright (c) 2023 Trevor Monk
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+==============================================================================*/
+
+#ifndef SESSIONMGR_H
+#define SESSIONMGR_H
+
+/*==============================================================================
+        Includes
+==============================================================================*/
+
+#include <stdint.h>
+#include <string.h>
+
+/*==============================================================================
+        Public definitions
+==============================================================================*/
+
+/*! session manager identifier 'SMGR' */
+#define SESSION_MANAGER_ID  0x534D4752
+
+/*! session manager version */
+#define SESSION_MANAGER_VERSION 0x00000001
+
+#ifndef SESSION_MAX_USERNAME_LEN
+/*! maximum session username length */
+#define SESSION_MAX_USERNAME_LEN    128
+#endif
+
+#ifndef SESSION_MAX_PASSWORD_LEN
+/*! maximum session password length */
+#define SESSION_MAX_PASSWORD_LEN    128
+#endif
+
+#ifndef SESSION_MAX_REFERENCE_LEN
+/*! maximum session reference length */
+#define SESSION_MAX_REFERENCE_LEN   128
+#endif
+
+#ifndef SESSION_MAX_RESPONSE_LEN
+/*! maximum session response length */
+#define SESSION_MAX_RESPONSE_LEN   128
+#endif
+
+/*! Session Manager Endpoint */
+#ifndef SESSION_MANAGER_NAME
+#define SESSION_MANAGER_NAME "/sessionmgr"
+#endif
+
+/*==============================================================================
+        Public types
+==============================================================================*/
+
+/*! request type */
+typedef enum sessionRequestType
+{
+    /*! invalid request */
+    SESSION_REQUEST_INVALID = 0,
+
+    /*! new session request */
+    SESSION_REQUEST_NEW = 1,
+
+    /*! close session request */
+    SESSION_REQUEST_DELETE = 2
+} SessionRequestType;
+
+/*! response type */
+typedef enum sessionResponseType
+{
+    /*! invalid response */
+    SESSION_RESPONSE_FAILED = 0,
+
+    /*! new session request */
+    SESSION_RESPONSE_OK = 1
+
+} SessionResponseType;
+
+/*! session request */
+typedef struct sessionRequest
+{
+    /*! session request identifier, should be SESSION_MANAGER_ID */
+    uint32_t id;
+
+    /*! session request version, should be SESSION_MANAGER_VERSION */
+    uint32_t version;
+
+    /*! session manager request type */
+    SessionRequestType type;
+
+    /*! user name */
+    char username[SESSION_MAX_USERNAME_LEN+1];
+
+    /*! password */
+    char password[SESSION_MAX_PASSWORD_LEN+1];
+
+    /*! client reference */
+    char reference[SESSION_MAX_REFERENCE_LEN+1];
+
+} SessionRequest;
+
+/*! session response */
+typedef struct sessionResponse
+{
+    /*! session request identifier, should be SESSION_MANAGER_ID */
+    uint32_t id;
+
+    /*! session request version, should be SESSION_MANAGER_VERSION */
+    uint32_t version;
+
+    /*! response type */
+    SessionResponseType type;
+
+    /*! response buffer */
+    char response[SESSION_MAX_RESPONSE_LEN+1];
+
+} SessionResponse;
+
+/*==============================================================================
+        Public definitions
+==============================================================================*/
+
+int SESSIONMGR_NewSession( char *username,
+                           char *password,
+                           char *reference,
+                           char *session,
+                           size_t buflen );
+
+#endif
