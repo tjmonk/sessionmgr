@@ -56,6 +56,7 @@ SOFTWARE.
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <signal.h>
+#include <time.h>
 #include <sys/un.h>
 #include <stdbool.h>
 #include <string.h>
@@ -77,6 +78,12 @@ SOFTWARE.
 #ifndef SESSION_ENABLE_NAME
 #define SESSION_ENABLE_NAME "/sys/session/enable"
 #endif
+
+/*! timer notification */
+#define TIMER_NOTIFICATION SIGRTMIN+5
+
+/*! timer rate */
+#define TIMER_MS 5000
 
 /*==============================================================================
         Private types
@@ -152,6 +159,8 @@ static int ProcessClientRequest( SessionMgrState *pState,
                                  SessionRequest *pRequest,
                                  int fd );
 static int CheckPassword( const char* user, const char* password );
+static int SetupTimer( int ms );
+static int HandlePrintRequest( SessionMgrState *pState, int32_t id );
 
 /*==============================================================================
         Private file scoped variables
@@ -199,15 +208,20 @@ int main(int argc, char **argv)
     state.hVarServer = VARSERVER_Open();
 
     /* set up varserver notifications */
-    SetupNotifications( &state );
-
-    result = SessionMgrInit( &state );
-    while ( 1 )
+    if ( SetupNotifications( &state ) == EOK )
     {
-        result = ProcessSockets( &state );
-    }
+        /* set up timer */
+        if ( SetupTimer( TIMER_MS ) == EOK )
+        {
+            result = SessionMgrInit( &state );
+            while ( 1 )
+            {
+                result = ProcessSockets( &state );
+            }
 
-    unlink(SESSION_MANAGER_NAME);
+            unlink(SESSION_MANAGER_NAME);
+        }
+    }
 
     return result == EOK ? 0 : 1;
 }
@@ -355,6 +369,62 @@ static void TerminationHandler( int signum, siginfo_t *info, void *ptr )
 
     exit( 1 );
 }
+
+/*============================================================================*/
+/*  SetupTimer                                                                */
+/*!
+    Set up a timer
+
+    The SetupTimer function sets up a timer to periodically decrement the
+    session timeout counter.
+
+    @param[in]
+        ms
+            Timer tick rate (in milliseconds)
+
+    @retval EOK timer set up ok
+    @retval other error from timer_create or timer_settime
+
+==============================================================================*/
+static int SetupTimer( int ms )
+{
+    struct sigevent te;
+    struct itimerspec its;
+    time_t secs = 0;
+    long msecs = 0;
+    timer_t *timerID;
+    int result = EINVAL;
+    static timer_t timer = 0;
+    int rc;
+
+    timerID = &timer;
+
+    /* convert milliseconds into seconds and milliseconds */
+    secs = ms / 1000;
+    msecs = ms % 1000;
+
+    /* Set and enable alarm */
+    te.sigev_notify = SIGEV_SIGNAL;
+    te.sigev_signo = TIMER_NOTIFICATION;
+    te.sigev_value.sival_int = 1;
+    rc = timer_create(CLOCK_REALTIME, &te, timerID);
+    if ( rc == 0 )
+    {
+        its.it_interval.tv_sec = secs;
+        its.it_interval.tv_nsec = msecs * 1000000L;
+        its.it_value.tv_sec = secs;
+        its.it_value.tv_nsec = msecs * 1000000L;
+        rc = timer_settime(*timerID, 0, &its, NULL);
+        result = ( rc == 0 ) ? EOK : errno;
+    }
+    else
+    {
+        result = errno;
+    }
+
+    return result;
+}
+
 /*============================================================================*/
 /*  SessionMgrInit                                                            */
 /*!
@@ -513,7 +583,6 @@ static int NewClient( SessionMgrState *pState, int fd )
     int result = EINVAL;
     SessionMgrClient *p;
 
-    printf("NewClient\n");
     if ( pState != NULL )
     {
         /* assume everything is ok until it isn't */
@@ -582,7 +651,6 @@ static int DeleteClient( SessionMgrState *pState, int fd )
     SessionMgrClient *p;
     SessionMgrClient *lastp = NULL;
 
-    printf("DeleteClient\n");
     if ( pState != NULL )
     {
         /* assume client not found until it is */
@@ -715,7 +783,6 @@ static int ProcessSockets( SessionMgrState *pState )
     int activity;
     fd_set read_fds;
 
-    printf("ProcessSockets\n");
     if ( pState != NULL )
     {
         result = EOK;
@@ -730,7 +797,6 @@ static int ProcessSockets( SessionMgrState *pState )
                            NULL );
         if ( activity )
         {
-            printf("activity detected\n");
             if ( FD_ISSET( pState->sock, &read_fds ) )
             {
                 /* handle a new client connection */
@@ -774,7 +840,6 @@ static int HandleNewClient( SessionMgrState *pState )
     int result = EINVAL;
     int fd;
 
-    printf("HandleNewClient\n");
     if ( pState != NULL )
     {
         if ( pState->sock >= 0 )
@@ -810,10 +875,73 @@ static int HandleNewClient( SessionMgrState *pState )
 static int HandleVarNotification( SessionMgrState *pState )
 {
     int result = EINVAL;
+    int signum;
+    int32_t sigval;
 
     if ( pState != NULL )
     {
+        signum = VARSERVER_WaitSignalfd( pState->varserver_fd, &sigval );
+        if ( signum == SIG_VAR_TIMER )
+        {
+            printf("tick!\n");
+        }
+        else if ( signum == SIG_VAR_PRINT )
+        {
+            HandlePrintRequest( pState, sigval );
+        }
 
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  HandlePrintRequest                                                        */
+/*!
+    Handle a varserver print request notification
+
+    The HandlePrintRequest function handles a print request notification
+    from the variable server.
+
+    @param[in]
+        pState
+            pointer to the Session Manager State
+
+    @param[in]
+        id
+            print notification identifier
+
+    @retval EOK print request notification handled successfully
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int HandlePrintRequest( SessionMgrState *pState, int32_t id )
+{
+    int result = EINVAL;
+    VAR_HANDLE hVar;
+    int fd;
+
+    if ( pState != NULL )
+    {
+        /* open a print session */
+        if ( VAR_OpenPrintSession( pState->hVarServer,
+                                   id,
+                                   &hVar,
+                                   &fd ) == EOK )
+        {
+            result = ENOENT;
+
+            if ( hVar == pState->hSessionInfo )
+            {
+                dprintf( fd, "Hello World!\n" );
+            }
+
+            /* Close the print session */
+            result = VAR_ClosePrintSession( pState->hVarServer,
+                                            id,
+                                            fd );
+
+        }
     }
 
     return result;
@@ -843,7 +971,6 @@ static int HandleClientRequest( SessionMgrState *pState, fd_set *read_fds )
     int fd;
     SessionMgrClient *p;
 
-    printf("HandleClientRequest\n");
     if ( pState != NULL )
     {
         result = EOK;
@@ -900,7 +1027,6 @@ static int ReadClientRequest( SessionMgrState *pState, int fd )
 
     int result = EINVAL;
 
-    printf("ReadClientRequest\n");
     if ( pState != NULL )
     {
         len = sizeof( SessionRequest );
@@ -956,7 +1082,6 @@ static int ProcessClientRequest( SessionMgrState *pState,
     ssize_t n;
     int rc;
 
-    printf("ProcessClientRequest\n");
     if ( ( pState != NULL ) &&
          ( pReq != NULL ) &&
          ( fd > 0 ) )
