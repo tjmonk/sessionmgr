@@ -81,6 +81,12 @@ typedef struct sessionState
     /*! client reference */
     char *clientref;
 
+    /*! session identifier */
+    char *session;
+
+    /*! operating mode: login, logout */
+    char *mode;
+
 } SessionState;
 
 #ifndef EOK
@@ -131,27 +137,39 @@ int main(int argc, char **argv)
     state.username = "root";
     state.password = "root";
     state.clientref = "session_tester";
+    state.mode = "";
 
     /* Process the command line options */
     ProcessOptions( argc, argv, &state );
 
     /* create a new session */
-    result = SESSIONMGR_NewSession( state.username,
-                                    state.password,
-                                    state.clientref,
-                                    session,
-                                    BUFSIZ );
-
-    if ( state.verbose == true )
+    if ( strcmp( state.mode, "login" ) == 0 )
     {
-        if ( result == EOK )
+        result = SESSIONMGR_NewSession( state.username,
+                                        state.password,
+                                        state.clientref,
+                                        session,
+                                        BUFSIZ );
+        if ( state.verbose == true )
         {
-            printf("session = %s\n", session );
+            if ( result == EOK )
+            {
+                printf("session = %s\n", session );
+            }
         }
-        else
-        {
-            printf("%s\n", strerror( result ));
-        }
+    }
+    else if ( strcmp( state.mode, "logout" ) == 0 )
+    {
+        result = SESSIONMGR_EndSession( state.session );
+    }
+    else
+    {
+        result = ENOTSUP;
+    }
+
+    if ( result != EOK )
+    {
+        printf("%s\n", strerror( result ));
     }
 
     return result == EOK ? 0 : 1;
@@ -176,12 +194,14 @@ static void usage( char *cmdname )
     if( cmdname != NULL )
     {
         fprintf(stderr,
-                "usage: %s [-v] [-h] [-u user] [-p pass] [-r ref]\n"
+                "usage: %s [-v] [-h] [-u user] [-p pass] [-r ref] [-m mode]\n"
                 " [-v] : verbose mode\n"
                 " [-h] : display this help\n"
+                " [-m mode] : mode = login|logout\n"
                 " [-u user] : username\n"
                 " [-p pass] : password\n"
-                " [-r ref] : unique client reference\n",
+                " [-r ref] : unique client reference\n"
+                " [-s session] : session identifier\n",
                 cmdname );
     }
 }
@@ -214,7 +234,7 @@ static int ProcessOptions( int argC, char *argV[], SessionState *pState )
 {
     int c;
     int result = EINVAL;
-    const char *options = "vhu:p:r:";
+    const char *options = "vhu:p:r:s:m:";
 
     if( ( pState != NULL ) &&
         ( argV != NULL ) )
@@ -244,6 +264,14 @@ static int ProcessOptions( int argC, char *argV[], SessionState *pState )
 
                 case 'r':
                     pState->clientref = optarg;
+                    break;
+
+                case 's':
+                    pState->session = optarg;
+                    break;
+
+                case 'm':
+                    pState->mode = optarg;
                     break;
 
                 default:

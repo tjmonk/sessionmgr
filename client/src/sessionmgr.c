@@ -116,13 +116,11 @@ int SESSIONMGR_NewSession( char *username,
     SessionResponse resp;
     int result = EINVAL;
 
-    printf("SESSIONMGR_NewSession\n");
-
     if ( ( username != NULL ) &&
          ( password != NULL ) &&
          ( reference != NULL ) &&
          ( session != NULL ) &&
-         ( buflen > 0 ) )
+         ( buflen > SESSION_ID_LEN ) )
     {
         sock = socket(AF_UNIX, SOCK_STREAM, 0);
         if ( sock > 0 )
@@ -175,9 +173,98 @@ int SESSIONMGR_NewSession( char *username,
                 }
                 else
                 {
-                    strncpy( session, resp.response, buflen );
-                    session[buflen-1] = 0;
-                    result = EOK;
+                    if ( resp.responseCode == EOK )
+                    {
+                        strncpy( session, resp.sessionId, buflen );
+                        session[buflen-1] = 0;
+                    }
+
+                    result = resp.responseCode;
+                }
+            }
+        }
+        else
+        {
+            printf("%s\n", strerror(errno));
+        }
+
+        close( sock );
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  SESSIONMGR_EndSession                                                     */
+/*!
+    Terminate a session
+
+    The SESSIONMGR_EndSession requests the termination of an existing session
+
+    @param[in]
+        session
+            pointer to the session identifier
+
+    @retval EOK session terminated successfully
+    @retval ENOENT session not found
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+int SESSIONMGR_EndSession( char *session )
+{
+    int sock;
+    int rc;
+    struct sockaddr_un server;
+    ssize_t len;
+    ssize_t n;
+    SessionRequest req;
+    SessionResponse resp;
+    int result = EINVAL;
+
+    if ( session != NULL )
+    {
+        sock = socket(AF_UNIX, SOCK_STREAM, 0);
+        if ( sock > 0 )
+        {
+            server.sun_family = AF_UNIX;
+            strcpy(server.sun_path, SESSION_MANAGER_NAME );
+        }
+        else
+        {
+            printf("%s\n", strerror(errno));
+        }
+
+        rc = connect( sock,
+                      (struct sockaddr *) &server,
+                      sizeof(struct sockaddr_un));
+        if( rc >= 0 )
+        {
+            req.id = SESSION_MANAGER_ID;
+            req.version = SESSION_MANAGER_VERSION;
+            req.type = SESSION_REQUEST_DELETE;
+
+            strncpy( req.sessionId,
+                     session,
+                     SESSION_ID_LEN );
+            req.sessionId[SESSION_ID_LEN] = 0;
+
+            len = sizeof( SessionRequest );
+            n = write( sock, &req, len );
+            if ( n != len )
+            {
+                result = EBADMSG;
+            }
+            else
+            {
+                len = sizeof( SessionResponse );
+                n = read( sock, &resp, len );
+                if ( n != len )
+                {
+                    result = EBADMSG;
+                }
+                else
+                {
+                    result = resp.responseCode;
                 }
             }
         }

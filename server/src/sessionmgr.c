@@ -55,6 +55,7 @@ SOFTWARE.
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <sys/random.h>
 #include <signal.h>
 #include <time.h>
 #include <sys/un.h>
@@ -83,7 +84,12 @@ SOFTWARE.
 #define TIMER_NOTIFICATION SIGRTMIN+5
 
 /*! timer rate */
-#define TIMER_MS 5000
+#define TIMER_S 5
+
+#ifndef DEFAULT_SESSION_TIMEOUT
+/*! default session timeout */
+#define DEFAULT_SESSION_TIMEOUT 300
+#endif
 
 /*==============================================================================
         Private types
@@ -98,6 +104,26 @@ typedef struct sessionMgrClient
     /*! pointer to the next session manager client */
     struct sessionMgrClient *pNext;
 } SessionMgrClient;
+
+/*! The sessionInfo object is used to track the active client sessions */
+typedef struct sessionInfo
+{
+    /*! length of time remaining on the session */
+    int timeout;
+
+    /*! session identifier */
+    char sessionId[SESSION_ID_LEN+1];
+
+    /*! user name */
+    char username[SESSION_MAX_USERNAME_LEN+1];
+
+    /*! client reference */
+    char reference[SESSION_MAX_REFERENCE_LEN+1];
+
+    /*! pointer to the next session info object in the list */
+    struct sessionInfo *pNext;
+
+} SessionInfo;
 
 /*! Session Manager state */
 typedef struct sessionMgrState
@@ -135,7 +161,17 @@ typedef struct sessionMgrState
     /*! list of active session clients */
     SessionMgrClient *pClientList;
 
+    /*! pointer to the session info free list */
+    SessionInfo *pFreeSessions;
+
+    /*! pointer to the active sessions */
+    SessionInfo *pActiveSessions;
+
+    /*! session timeout */
+    int sessionTimeout;
+
 } SessionMgrState;
+
 
 /*==============================================================================
         Private function declarations
@@ -158,13 +194,30 @@ static int ReadClientRequest( SessionMgrState *pState, int fd );
 static int ProcessClientRequest( SessionMgrState *pState,
                                  SessionRequest *pRequest,
                                  int fd );
+static int ProcessRequestNewSession( SessionMgrState *pState,
+                                     SessionRequest *pReq,
+                                     SessionResponse *pResp );
+static int ProcessRequestDeleteSession( SessionMgrState *pState,
+                                        SessionRequest *pReq,
+                                        SessionResponse *pResp );
 static int CheckPassword( const char* user, const char* password );
-static int SetupTimer( int ms );
+static int SetupTimer( int s );
 static int HandlePrintRequest( SessionMgrState *pState, int32_t id );
+static SessionInfo *FindSession( SessionMgrState *pState,
+                                 SessionRequest *pReq );
+static SessionInfo *FindSessionById( SessionMgrState *pState,
+                                     char *pSessionId );
+static SessionInfo *NewSession( SessionMgrState *pState,
+                                SessionRequest *pReq );
+static int GetSessionToken( char *buf, size_t len );
+static int CheckTimeout( SessionMgrState *pState );
+void DeleteSession( SessionMgrState *pState, SessionInfo *pSessionInfo );
+static int PrintSessions( SessionMgrState *pState, int fd );
 
 /*==============================================================================
         Private file scoped variables
 ==============================================================================*/
+/*! session manager state object */
 static SessionMgrState state;
 
 /*==============================================================================
@@ -211,7 +264,7 @@ int main(int argc, char **argv)
     if ( SetupNotifications( &state ) == EOK )
     {
         /* set up timer */
-        if ( SetupTimer( TIMER_MS ) == EOK )
+        if ( SetupTimer( TIMER_S ) == EOK )
         {
             result = SessionMgrInit( &state );
             while ( 1 )
@@ -379,29 +432,24 @@ static void TerminationHandler( int signum, siginfo_t *info, void *ptr )
     session timeout counter.
 
     @param[in]
-        ms
-            Timer tick rate (in milliseconds)
+        s
+            Timer tick rate (in seconds)
 
     @retval EOK timer set up ok
     @retval other error from timer_create or timer_settime
 
 ==============================================================================*/
-static int SetupTimer( int ms )
+static int SetupTimer( int s )
 {
     struct sigevent te;
     struct itimerspec its;
-    time_t secs = 0;
-    long msecs = 0;
+    time_t secs = (time_t)s;
     timer_t *timerID;
     int result = EINVAL;
     static timer_t timer = 0;
     int rc;
 
     timerID = &timer;
-
-    /* convert milliseconds into seconds and milliseconds */
-    secs = ms / 1000;
-    msecs = ms % 1000;
 
     /* Set and enable alarm */
     te.sigev_notify = SIGEV_SIGNAL;
@@ -411,9 +459,9 @@ static int SetupTimer( int ms )
     if ( rc == 0 )
     {
         its.it_interval.tv_sec = secs;
-        its.it_interval.tv_nsec = msecs * 1000000L;
+        its.it_interval.tv_nsec = 0;
         its.it_value.tv_sec = secs;
-        its.it_value.tv_nsec = msecs * 1000000L;
+        its.it_value.tv_nsec = 0;
         rc = timer_settime(*timerID, 0, &its, NULL);
         result = ( rc == 0 ) ? EOK : errno;
     }
@@ -450,6 +498,9 @@ static int SessionMgrInit( SessionMgrState *pState )
 
     if ( pState != NULL )
     {
+        /* set default session timeout */
+        pState->sessionTimeout = DEFAULT_SESSION_TIMEOUT;
+
         /* create a listening socket */
         pState->sock = socket(AF_UNIX, SOCK_STREAM, 0);
         if (pState->sock < 0)
@@ -470,7 +521,7 @@ static int SessionMgrInit( SessionMgrState *pState )
             }
             else
             {
-                printf( "Socket has name %s\n", server.sun_path );
+                /* accept incoming connections */
                 listen( pState->sock, 5);
 
                 /* add the Session Manager socket to the read fds set */
@@ -883,7 +934,8 @@ static int HandleVarNotification( SessionMgrState *pState )
         signum = VARSERVER_WaitSignalfd( pState->varserver_fd, &sigval );
         if ( signum == SIG_VAR_TIMER )
         {
-            printf("tick!\n");
+            /* check session timeout */
+            CheckTimeout( pState );
         }
         else if ( signum == SIG_VAR_PRINT )
         {
@@ -933,14 +985,13 @@ static int HandlePrintRequest( SessionMgrState *pState, int32_t id )
 
             if ( hVar == pState->hSessionInfo )
             {
-                dprintf( fd, "Hello World!\n" );
+                PrintSessions( pState, fd );
             }
 
             /* Close the print session */
             result = VAR_ClosePrintSession( pState->hVarServer,
                                             id,
                                             fd );
-
         }
     }
 
@@ -1065,6 +1116,10 @@ static int ReadClientRequest( SessionMgrState *pState, int fd )
             pointer to the Session Manager State
 
     @param[in]
+        pReq
+            pointer to the SessionRequest object
+
+    @param[in]
         fd
             the file descriptor of the requesting client
 
@@ -1080,30 +1135,30 @@ static int ProcessClientRequest( SessionMgrState *pState,
     SessionResponse resp;
     ssize_t len;
     ssize_t n;
-    int rc;
 
     if ( ( pState != NULL ) &&
          ( pReq != NULL ) &&
          ( fd > 0 ) )
     {
-        printf("username: %s\n", pReq->username);
-        printf("password: %s\n", pReq->password);
-        printf("reference: %s\n", pReq->reference);
+        memset( &resp, 0, sizeof( SessionResponse ) );
+
+        switch( pReq->type )
+        {
+            case SESSION_REQUEST_NEW:
+                result = ProcessRequestNewSession( pState, pReq, &resp );
+                break;
+
+            case SESSION_REQUEST_DELETE:
+                result = ProcessRequestDeleteSession( pState, pReq, &resp );
+                break;
+
+            default:
+                resp.responseCode = ENOTSUP;
+                break;
+        }
 
         resp.id = SESSION_MANAGER_ID;
         resp.version = SESSION_MANAGER_VERSION;
-
-        rc = CheckPassword( pReq->username, pReq->password );
-        if ( rc == EOK )
-        {
-            resp.type = SESSION_RESPONSE_OK;
-            strcpy(resp.response,"user authenticated");
-        }
-        else
-        {
-            resp.type = SESSION_RESPONSE_FAILED;
-            strcpy(resp.response,"access denied");
-        }
 
         len = sizeof(SessionResponse);
         n = write( fd, &resp, len);
@@ -1114,6 +1169,137 @@ static int ProcessClientRequest( SessionMgrState *pState,
         else
         {
             result = EIO;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  ProcessRequestNewSession                                                  */
+/*!
+    Process a client NewSession request
+
+    The ProcessRequestNewSession function processes a NewSession request
+    for the specified client.
+
+    @param[in]
+        pState
+            pointer to the Session Manager State
+
+    @param[in]
+        pReq
+            pointer to the SessionRequest object
+
+    @param[in,out]
+        pResp
+            pointer to the SessionResponse object
+
+    @retval EOK client request handled successfully
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int ProcessRequestNewSession( SessionMgrState *pState,
+                                     SessionRequest *pReq,
+                                     SessionResponse *pResp )
+{
+    int result = EINVAL;
+    SessionInfo *pSessionInfo;
+    int rc;
+
+    if ( ( pState != NULL ) &&
+         ( pReq != NULL ) &&
+         ( pResp != NULL ) )
+    {
+        result = EOK;
+
+        /* check if password is valid for the specified user */
+        rc = CheckPassword( pReq->username, pReq->password );
+        if ( rc == EOK )
+        {
+            /* see if a session for this user/clientref already exists */
+            pSessionInfo = FindSession( pState, pReq );
+            if ( pSessionInfo != NULL )
+            {
+                pResp->responseCode = EOK;
+
+                /* reset the timeout */
+                pSessionInfo->timeout = pState->sessionTimeout;
+
+                strcpy(pResp->sessionId, pSessionInfo->sessionId);
+            }
+            else
+            {
+                /* create a new session */
+                pSessionInfo = NewSession( pState, pReq );
+                if ( pSessionInfo != NULL )
+                {
+                    pResp->responseCode = EOK;
+                    strcpy(pResp->sessionId, pSessionInfo->sessionId);
+                }
+                else
+                {
+                    pResp->responseCode = EIO;
+                }
+            }
+        }
+        else
+        {
+            pResp->responseCode = EACCES;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  ProcessRequestDeleteSession                                               */
+/*!
+    Process a client DeleteSession request
+
+    The ProcessRequestDeleteSession function processes a DeleteSession request
+    for the specified client.
+
+    @param[in]
+        pState
+            pointer to the Session Manager State
+
+    @param[in]
+        pReq
+            pointer to the SessionRequest object
+
+    @param[in,out]
+        pResp
+            pointer to the SessionResponse object
+
+    @retval EOK client request handled successfully
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int ProcessRequestDeleteSession( SessionMgrState *pState,
+                                        SessionRequest *pReq,
+                                        SessionResponse *pResp )
+{
+    int result = EINVAL;
+    SessionInfo *pSessionInfo;
+
+    if ( ( pState != NULL ) &&
+         ( pReq != NULL ) &&
+         ( pResp != NULL ) )
+    {
+        result = EOK;
+
+        strcpy( pResp->sessionId, pReq->sessionId );
+
+        pSessionInfo = FindSessionById( pState, pReq->sessionId );
+        if ( pSessionInfo != NULL )
+        {
+            DeleteSession( pState, pSessionInfo );
+            pResp->responseCode = EOK;
+        }
+        else
+        {
+            pResp->responseCode = ENOENT;
         }
     }
 
@@ -1188,6 +1374,380 @@ static int CheckPassword( const char* user, const char* password )
             /* user does not exist */
             result = ENOENT;
         }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  FindSession                                                               */
+/*!
+    Search for a session
+
+    The FindSession function searches the active session list for a
+    session which matches the user name and password contained in the
+    SessionRequest
+
+    @param[in]
+        pState
+            pointer to the Session Manager state
+
+    @param[in]
+        pReq
+            pointer to the Session Request containing the user name and
+            client reference
+
+    @retval pointer to the SessionInfo object which matched the query
+    @retval NULL no SessionInfo object matched the query
+
+==============================================================================*/
+static SessionInfo *FindSession( SessionMgrState *pState,
+                                 SessionRequest *pReq )
+{
+    SessionInfo *pSession = NULL;
+
+    if ( ( pState != NULL ) &&
+         ( pReq != NULL ) )
+    {
+        pSession = pState->pActiveSessions;
+        while ( pSession != NULL )
+        {
+            if ( ( strcmp( pReq->username, pSession->username ) == 0 ) &&
+                 ( strcmp( pReq->reference, pSession->reference ) == 0 ) )
+            {
+                break;
+            }
+
+            pSession = pSession->pNext;
+        }
+    }
+
+    return pSession;
+}
+
+/*============================================================================*/
+/*  FindSession                                                               */
+/*!
+    Search for a session
+
+    The FindSession function searches the active session list for a
+    session which matches the user name and password contained in the
+    SessionRequest
+
+    @param[in]
+        pState
+            pointer to the Session Manager state
+
+    @param[in]
+        pSessionId
+            pointer to the Session identifier to search for
+
+    @retval pointer to the SessionInfo object which matched the query
+    @retval NULL no SessionInfo object matched the query
+
+==============================================================================*/
+static SessionInfo *FindSessionById( SessionMgrState *pState,
+                                     char *pSessionId )
+{
+    SessionInfo *pSession = NULL;
+
+    if ( ( pState != NULL ) &&
+         ( pSessionId != NULL ) )
+    {
+        pSession = pState->pActiveSessions;
+        while ( pSession != NULL )
+        {
+            if ( strcmp( pSessionId, pSession->sessionId ) == 0 )
+            {
+                break;
+            }
+
+            pSession = pSession->pNext;
+        }
+    }
+
+    return pSession;
+}
+
+/*============================================================================*/
+/*  NewSession                                                                */
+/*!
+    Create a new session
+
+    The NewSession function creates a new session and adds it to the
+    active session list
+
+    @param[in]
+        pState
+            pointer to the Session Manager state
+
+    @param[in]
+        pReq
+            pointer to the Session Request object containing the username
+            and client reference
+
+    @retval pointer to the created SessionInfo object
+    @retval NULL could not create the session
+
+==============================================================================*/
+static SessionInfo *NewSession( SessionMgrState *pState,
+                                SessionRequest *pReq )
+{
+    SessionInfo *pSession = NULL;
+    char sessionId[ SESSION_ID_LEN + 1 ];
+
+    if ( ( pState != NULL ) &&
+         ( pReq != NULL ) )
+    {
+        /* generate a session token */
+        if ( GetSessionToken( sessionId, SESSION_ID_LEN ) == EOK )
+        {
+            /* nul terminate the session token */
+            sessionId[SESSION_ID_LEN] = 0;
+
+            if ( pState->pFreeSessions != NULL )
+            {
+                /* get the session info object from the free session list */
+                pSession = pState->pFreeSessions;
+                pState->pFreeSessions = pSession->pNext;
+                memset( pSession, 0, sizeof(SessionInfo));
+            }
+            else
+            {
+                pSession = calloc( 1, sizeof( SessionInfo ));
+            }
+
+            if ( pSession != NULL )
+            {
+                /* copy the session username and client reference */
+                strcpy( pSession->username, pReq->username );
+                strcpy( pSession->reference, pReq->reference );
+                strcpy( pSession->sessionId, sessionId );
+
+                /* set the session timeout */
+                pSession->timeout = pState->sessionTimeout;
+
+                /* add the new session to the head of the active session list */
+                pSession->pNext = pState->pActiveSessions;
+                pState->pActiveSessions = pSession;
+            }
+        }
+    }
+
+    return pSession;
+}
+
+/*============================================================================*/
+/*  GetSessionToken                                                           */
+/*!
+    Generate a session token
+
+    The GetSessionToken function generates a session of the specified length
+    and stores it into the specifier buffer (which mush have enough allocated
+    space for the specified length).
+
+    @param[in]
+        buf
+            pointer to the Session token buffer
+
+    @param[in]
+        len
+            length of the token to generate (excluding NUL terminator)
+
+    @retval EOK token was successfully generated
+    @retval EINVAL invalid arguments
+    @retval ENOTSUP token generation failed
+
+==============================================================================*/
+static int GetSessionToken( char *buf, size_t len )
+{
+    int result = EINVAL;
+    ssize_t n;
+    size_t i;
+    size_t l;
+    const char set[] = "IA7Ra2Hsyh"
+                       "SdtB5jYboQZ1lGfE4NrMmx8WzV"
+                       "uCJeK3pciD6XqT9Lvk0PFwgUOn";
+    if ( buf != NULL )
+    {
+        l = sizeof(set) - 1;
+
+        n = getrandom( buf, len, 0 );
+        if ( (size_t)n == len )
+        {
+            for( i = 0 ; i < len ; i++ )
+            {
+                buf[i] = set[buf[i] % l];
+            }
+
+            result = EOK;
+        }
+        else
+        {
+            result = ENOTSUP;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  CheckTimeout                                                              */
+/*!
+    Check all sessions for timeout
+
+    The CheckTimeout function iterates through all the active sessions,
+    checking each for timeout.  If a session has timed out it will
+    be deleted.
+
+    @param[in]
+        pState
+            pointer to the Session Manager state
+
+    @retval EOK timeout check was completed
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int CheckTimeout( SessionMgrState *pState )
+{
+    int result = EINVAL;
+    SessionInfo *pSessionInfo;
+    SessionInfo *p;
+
+    if ( pState != NULL )
+    {
+        result = EOK;
+
+        pSessionInfo = pState->pActiveSessions;
+        while( pSessionInfo != NULL )
+        {
+            p = pSessionInfo;
+            pSessionInfo = pSessionInfo->pNext;
+
+            p->timeout -= TIMER_S;
+            if ( p->timeout <= 0 )
+            {
+                /* remove the session from the active session list */
+                DeleteSession( pState, p );
+            }
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  DeleteSession                                                             */
+/*!
+    Delete the specified session
+
+    The DeleteSession function deletes the specified session
+    and moves it into the free session list.
+
+    @param[in]
+        pState
+            pointer to the Session Manager state
+
+    @param[in]
+        pSessionInfo
+            pointer to the session object to delete
+
+==============================================================================*/
+void DeleteSession( SessionMgrState *pState, SessionInfo *pSessionInfo )
+{
+    SessionInfo *p;
+    SessionInfo *pLast = NULL;
+    bool found = false;
+
+    if ( ( pState != NULL ) &&
+         ( pSessionInfo != NULL ) )
+    {
+        if ( pSessionInfo == pState->pActiveSessions )
+        {
+            pState->pActiveSessions = pSessionInfo->pNext;
+            found = true;
+        }
+        else
+        {
+            /* start search from the second session in the list */
+            pLast = pState->pActiveSessions;
+            p = pLast->pNext;
+
+            /* iterate until we find the session */
+            while ( p != NULL )
+            {
+                if ( p == pSessionInfo )
+                {
+                    pLast->pNext = p->pNext;
+                    found = true;
+                    break;
+                }
+
+                pLast = p;
+                p = p->pNext;
+            }
+        }
+
+        if ( found == true )
+        {
+            /* place the deleted session on the free session list */
+            pSessionInfo->pNext = pState->pFreeSessions;
+            pState->pFreeSessions = pSessionInfo;
+        }
+    }
+}
+
+/*============================================================================*/
+/*  PrintSessions                                                             */
+/*!
+    Print the active sessions
+
+    The PrintSessions function prints out the username, client reference,
+    and time remaining for all of the active sessions.
+
+    @param[in]
+        pState
+            pointer to the Session Manager state
+
+    @param[in]
+        fd
+            output file descriptor
+
+==============================================================================*/
+static int PrintSessions( SessionMgrState *pState, int fd )
+{
+    int result = EINVAL;
+    SessionInfo *pSessionInfo;
+    int count = 0;
+
+    if ( ( pState != NULL ) &&
+         ( fd >= 0 ) )
+    {
+        pSessionInfo = pState->pActiveSessions;
+
+        result = EOK;
+
+        dprintf( fd, "[");
+        while( pSessionInfo != NULL )
+        {
+            if ( count )
+            {
+                dprintf( fd, "," );
+            }
+
+            dprintf( fd,
+                     "{ \"user\": \"%s\", \"reference\": \"%s\","
+                     "\"session\": \"%s\", \"remaining\": %d }",
+                     pSessionInfo->username,
+                     pSessionInfo->reference,
+                     pSessionInfo->sessionId,
+                     pSessionInfo->timeout );
+
+            count++;
+            pSessionInfo = pSessionInfo->pNext;
+        }
+
+        dprintf( fd, "]");
     }
 
     return result;

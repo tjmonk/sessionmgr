@@ -62,6 +62,11 @@ SOFTWARE.
 #define SESSION_MAX_RESPONSE_LEN   128
 #endif
 
+#ifndef SESSION_ID_LEN
+/*! session identifier length */
+#define SESSION_ID_LEN  64
+#endif
+
 /*! Session Manager Endpoint */
 #ifndef SESSION_MANAGER_NAME
 #define SESSION_MANAGER_NAME "/sessionmgr"
@@ -84,17 +89,6 @@ typedef enum sessionRequestType
     SESSION_REQUEST_DELETE = 2
 } SessionRequestType;
 
-/*! response type */
-typedef enum sessionResponseType
-{
-    /*! invalid response */
-    SESSION_RESPONSE_FAILED = 0,
-
-    /*! new session request */
-    SESSION_RESPONSE_OK = 1
-
-} SessionResponseType;
-
 /*! session request */
 typedef struct sessionRequest
 {
@@ -116,6 +110,9 @@ typedef struct sessionRequest
     /*! client reference */
     char reference[SESSION_MAX_REFERENCE_LEN+1];
 
+    /*! session identifier */
+    char sessionId[SESSION_ID_LEN+1];
+
 } SessionRequest;
 
 /*! session response */
@@ -127,11 +124,11 @@ typedef struct sessionResponse
     /*! session request version, should be SESSION_MANAGER_VERSION */
     uint32_t version;
 
-    /*! response type */
-    SessionResponseType type;
+    /*! response code */
+    int responseCode;
 
     /*! response buffer */
-    char response[SESSION_MAX_RESPONSE_LEN+1];
+    char sessionId[SESSION_ID_LEN+1];
 
 } SessionResponse;
 
@@ -144,5 +141,7 @@ int SESSIONMGR_NewSession( char *username,
                            char *reference,
                            char *session,
                            size_t buflen );
+
+int SESSIONMGR_EndSession( char *session );
 
 #endif
