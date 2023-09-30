@@ -150,26 +150,29 @@ int main(int argc, char **argv)
                                         state.clientref,
                                         session,
                                         BUFSIZ );
-        if ( state.verbose == true )
+        if ( result == EOK )
         {
-            if ( result == EOK )
-            {
-                printf("session = %s\n", session );
-            }
+            printf("%s", session );
         }
     }
+
     else if ( strcmp( state.mode, "logout" ) == 0 )
     {
         result = SESSIONMGR_EndSession( state.session );
+    }
+    else if ( strcmp( state.mode, "validate" ) == 0 )
+    {
+        result = SESSIONMGR_Validate( state.session );
     }
     else
     {
         result = ENOTSUP;
     }
 
-    if ( result != EOK )
+    if ( ( result != EOK ) &&
+         ( state.verbose == true ) )
     {
-        printf("%s\n", strerror( result ));
+        fprintf(stderr, "%s\n", strerror( result ));
     }
 
     return result == EOK ? 0 : 1;

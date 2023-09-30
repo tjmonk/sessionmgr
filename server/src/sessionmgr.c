@@ -200,6 +200,9 @@ static int ProcessRequestNewSession( SessionMgrState *pState,
 static int ProcessRequestDeleteSession( SessionMgrState *pState,
                                         SessionRequest *pReq,
                                         SessionResponse *pResp );
+static int ProcessRequestValidateSession( SessionMgrState *pState,
+                                          SessionRequest *pReq,
+                                          SessionResponse *pResp );
 static int CheckPassword( const char* user, const char* password );
 static int SetupTimer( int s );
 static int HandlePrintRequest( SessionMgrState *pState, int32_t id );
@@ -209,6 +212,7 @@ static SessionInfo *FindSessionById( SessionMgrState *pState,
                                      char *pSessionId );
 static SessionInfo *NewSession( SessionMgrState *pState,
                                 SessionRequest *pReq );
+
 static int GetSessionToken( char *buf, size_t len );
 static int CheckTimeout( SessionMgrState *pState );
 void DeleteSession( SessionMgrState *pState, SessionInfo *pSessionInfo );
@@ -1152,6 +1156,10 @@ static int ProcessClientRequest( SessionMgrState *pState,
                 result = ProcessRequestDeleteSession( pState, pReq, &resp );
                 break;
 
+            case SESSION_REQUEST_VALIDATE:
+                result = ProcessRequestValidateSession( pState, pReq, &resp );
+                break;
+
             default:
                 resp.responseCode = ENOTSUP;
                 break;
@@ -1300,6 +1308,59 @@ static int ProcessRequestDeleteSession( SessionMgrState *pState,
         else
         {
             pResp->responseCode = ENOENT;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  ProcessRequestValidateSession                                             */
+/*!
+    Process a client ValidateSession request
+
+    The ProcessRequestValidateSession function processes a ValidateSession
+    requestfor the specified client.
+
+    @param[in]
+        pState
+            pointer to the Session Manager State
+
+    @param[in]
+        pReq
+            pointer to the SessionRequest object
+
+    @param[in,out]
+        pResp
+            pointer to the SessionResponse object
+
+    @retval EOK client request handled successfully
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int ProcessRequestValidateSession( SessionMgrState *pState,
+                                          SessionRequest *pReq,
+                                          SessionResponse *pResp )
+{
+    int result = EINVAL;
+    SessionInfo *pSessionInfo;
+
+    if ( ( pState != NULL ) &&
+         ( pReq != NULL ) &&
+         ( pResp != NULL ) )
+    {
+        result = EOK;
+
+        strcpy( pResp->sessionId, pReq->sessionId );
+
+        pSessionInfo = FindSessionById( pState, pReq->sessionId );
+        if ( pSessionInfo != NULL )
+        {
+            pResp->responseCode = EOK;
+        }
+        else
+        {
+            pResp->responseCode = EACCES;
         }
     }
 
@@ -1737,7 +1798,7 @@ static int PrintSessions( SessionMgrState *pState, int fd )
 
             dprintf( fd,
                      "{ \"user\": \"%s\", \"reference\": \"%s\","
-                     "\"session\": \"%s\", \"remaining\": %d }",
+                     "\"session\": \"%8.8s\", \"remaining\": %d }",
                      pSessionInfo->username,
                      pSessionInfo->reference,
                      pSessionInfo->sessionId,

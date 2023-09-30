@@ -86,7 +86,11 @@ typedef enum sessionRequestType
     SESSION_REQUEST_NEW = 1,
 
     /*! close session request */
-    SESSION_REQUEST_DELETE = 2
+    SESSION_REQUEST_DELETE = 2,
+
+    /*! validate session request */
+    SESSION_REQUEST_VALIDATE = 3
+
 } SessionRequestType;
 
 /*! session request */
@@ -143,5 +147,7 @@ int SESSIONMGR_NewSession( char *username,
                            size_t buflen );
 
 int SESSIONMGR_EndSession( char *session );
+
+int SESSIONMGR_Validate( char *session );
 
 #endif

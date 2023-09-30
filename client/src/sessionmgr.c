@@ -64,6 +64,11 @@ SOFTWARE.
 ==============================================================================*/
 
 /*==============================================================================
+        Private function declarations
+==============================================================================*/
+static int sessionmgr_Connect();
+
+/*==============================================================================
         Public function definitions
 ==============================================================================*/
 
@@ -108,8 +113,6 @@ int SESSIONMGR_NewSession( char *username,
                            size_t buflen )
 {
     int sock;
-    int rc;
-    struct sockaddr_un server;
     ssize_t len;
     ssize_t n;
     SessionRequest req;
@@ -122,21 +125,8 @@ int SESSIONMGR_NewSession( char *username,
          ( session != NULL ) &&
          ( buflen > SESSION_ID_LEN ) )
     {
-        sock = socket(AF_UNIX, SOCK_STREAM, 0);
-        if ( sock > 0 )
-        {
-            server.sun_family = AF_UNIX;
-            strcpy(server.sun_path, SESSION_MANAGER_NAME );
-        }
-        else
-        {
-            printf("%s\n", strerror(errno));
-        }
-
-        rc = connect( sock,
-                      (struct sockaddr *) &server,
-                      sizeof(struct sockaddr_un));
-        if( rc >= 0 )
+        sock = sessionmgr_Connect();
+        if( sock >= 0 )
         {
             req.id = SESSION_MANAGER_ID;
             req.version = SESSION_MANAGER_VERSION;
@@ -183,10 +173,6 @@ int SESSIONMGR_NewSession( char *username,
                 }
             }
         }
-        else
-        {
-            printf("%s\n", strerror(errno));
-        }
 
         close( sock );
     }
@@ -213,8 +199,6 @@ int SESSIONMGR_NewSession( char *username,
 int SESSIONMGR_EndSession( char *session )
 {
     int sock;
-    int rc;
-    struct sockaddr_un server;
     ssize_t len;
     ssize_t n;
     SessionRequest req;
@@ -223,21 +207,8 @@ int SESSIONMGR_EndSession( char *session )
 
     if ( session != NULL )
     {
-        sock = socket(AF_UNIX, SOCK_STREAM, 0);
-        if ( sock > 0 )
-        {
-            server.sun_family = AF_UNIX;
-            strcpy(server.sun_path, SESSION_MANAGER_NAME );
-        }
-        else
-        {
-            printf("%s\n", strerror(errno));
-        }
-
-        rc = connect( sock,
-                      (struct sockaddr *) &server,
-                      sizeof(struct sockaddr_un));
-        if( rc >= 0 )
+        sock = sessionmgr_Connect();
+        if( sock >= 0 )
         {
             req.id = SESSION_MANAGER_ID;
             req.version = SESSION_MANAGER_VERSION;
@@ -268,15 +239,114 @@ int SESSIONMGR_EndSession( char *session )
                 }
             }
         }
-        else
+
+        close( sock );
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  SESSIONMGR_Validate                                                       */
+/*!
+    Validate a session
+
+    The SESSIONMGR_Validate checks to see if the specified session token
+    corresponds to a valid session.
+
+    @param[in]
+        session
+            pointer to the session identifier
+
+    @retval EOK session is valid
+    @retval EACCES session does not have access
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+int SESSIONMGR_Validate( char *session )
+{
+    int sock;
+    ssize_t len;
+    ssize_t n;
+    SessionRequest req;
+    SessionResponse resp;
+    int result = EINVAL;
+
+    if ( session != NULL )
+    {
+        sock = sessionmgr_Connect();
+        if( sock >= 0 )
         {
-            printf("%s\n", strerror(errno));
+            req.id = SESSION_MANAGER_ID;
+            req.version = SESSION_MANAGER_VERSION;
+            req.type = SESSION_REQUEST_VALIDATE;
+
+            strncpy( req.sessionId,
+                     session,
+                     SESSION_ID_LEN );
+            req.sessionId[SESSION_ID_LEN] = 0;
+
+            len = sizeof( SessionRequest );
+            n = write( sock, &req, len );
+            if ( n != len )
+            {
+                result = EBADMSG;
+            }
+            else
+            {
+                len = sizeof( SessionResponse );
+                n = read( sock, &resp, len );
+                if ( n != len )
+                {
+                    result = EBADMSG;
+                }
+                else
+                {
+                    result = resp.responseCode;
+                }
+            }
         }
 
         close( sock );
     }
 
     return result;
+}
+
+/*============================================================================*/
+/*  sessionmgr_Connect                                                        */
+/*!
+    Connect to Session Manager
+
+    The sessionmgr_Connect creates a socket and connects it to the session
+    manager.
+
+    @retval socket connected to the session manager
+    @retval -1 if no connection can be established
+
+==============================================================================*/
+static int sessionmgr_Connect()
+{
+    int sock = -1;
+    int rc;
+    struct sockaddr_un server;
+
+    sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    if ( sock > 0 )
+    {
+        server.sun_family = AF_UNIX;
+        strcpy(server.sun_path, SESSION_MANAGER_NAME );
+
+        rc = connect( sock,
+                        (struct sockaddr *) &server,
+                        sizeof(struct sockaddr_un));
+        if( rc < 0 )
+        {
+            close( sock );
+        }
+    }
+
+    return sock;
 }
 
 /*! @}
