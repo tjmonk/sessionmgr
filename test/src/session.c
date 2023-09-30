@@ -57,6 +57,7 @@ SOFTWARE.
 #include <string.h>
 #include <errno.h>
 #include <syslog.h>
+#include <getopt.h>
 #include <sessionmgr/sessionmgr.h>
 
 /*==============================================================================
