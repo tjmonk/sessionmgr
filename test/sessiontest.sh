@@ -8,6 +8,11 @@
 NEWUSER=bob
 useradd $NEWUSER
 
+groupadd reader
+groupadd writer
+
+usermod -a -G reader,writer bob
+
 # create a random password for bob
 password=`cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 10 | head -n 1`
 
@@ -70,3 +75,6 @@ vars -vn session/info
 
 # delete user bob
 userdel bob
+
+groupdel reader
+groupdel writer
