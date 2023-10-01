@@ -81,6 +81,11 @@ SOFTWARE.
 #define SESSION_ENABLE_NAME "/sys/session/enable"
 #endif
 
+/*! name of variable to enable session handling */
+#ifndef SESSION_TIMEOUT_NAME
+#define SESSION_TIMEOUT_NAME "/sys/session/timeout"
+#endif
+
 /*! timer notification */
 #define TIMER_NOTIFICATION SIGRTMIN+5
 
@@ -150,6 +155,9 @@ typedef struct sessionMgrState
     /*! handle to the session manager enable variable */
     VAR_HANDLE hSessionEnable;
 
+    /*! handle to the session manager enable variable */
+    VAR_HANDLE hSessionTimeout;
+
     /*! set of sockets waiting to be read */
     fd_set read_fds;
 
@@ -173,6 +181,9 @@ typedef struct sessionMgrState
 
     /*! session timeout */
     int sessionTimeout;
+
+    /*! enable */
+    bool enable;
 
 } SessionMgrState;
 
@@ -221,7 +232,8 @@ static SessionInfo *NewSession( SessionMgrState *pState,
 
 static int GetSessionToken( char *buf, size_t len );
 static int CheckTimeout( SessionMgrState *pState );
-void DeleteSession( SessionMgrState *pState, SessionInfo *pSessionInfo );
+static void DeleteSession( SessionMgrState *pState, SessionInfo *pSessionInfo );
+static int DeleteAllSessions( SessionMgrState *pState );
 static int PrintSessions( SessionMgrState *pState, int fd );
 
 /*==============================================================================
@@ -565,6 +577,7 @@ static int SetupNotifications( SessionMgrState *pState )
 {
     int result = EINVAL;
     int rc;
+    VarObject varobj;
 
     if ( pState != NULL )
     {
@@ -591,9 +604,36 @@ static int SetupNotifications( SessionMgrState *pState )
                                                  SESSION_ENABLE_NAME );
         if ( pState->hSessionEnable != VAR_INVALID )
         {
+            rc = VAR_Get( pState->hVarServer, pState->hSessionEnable, &varobj );
+            if ( rc == EOK )
+            {
+                pState->enable = varobj.val.ui != 0 ? true : false;
+            }
+
             /* set up modified notification */
             rc = VAR_Notify( pState->hVarServer,
                              pState->hSessionEnable,
+                             NOTIFY_MODIFIED );
+            if ( rc != EOK )
+            {
+                result = rc;
+            }
+        }
+
+        /* set up modified notification for optional session timeout variable */
+        pState->hSessionTimeout = VAR_FindByName( pState->hVarServer,
+                                                 SESSION_TIMEOUT_NAME );
+        if ( pState->hSessionTimeout != VAR_INVALID )
+        {
+            rc = VAR_Get(pState->hVarServer, pState->hSessionTimeout, &varobj );
+            if ( rc == EOK )
+            {
+                pState->sessionTimeout = varobj.val.ui;
+            }
+
+            /* set up modified notification */
+            rc = VAR_Notify( pState->hVarServer,
+                             pState->hSessionTimeout,
                              NOTIFY_MODIFIED );
             if ( rc != EOK )
             {
@@ -938,20 +978,52 @@ static int HandleVarNotification( SessionMgrState *pState )
     int result = EINVAL;
     int signum;
     int32_t sigval;
+    VAR_HANDLE hVar;
+    VarObject varobj;
 
     if ( pState != NULL )
     {
+        /* assume everything is ok until it is not */
+        result = EOK;
+
         signum = VARSERVER_WaitSignalfd( pState->varserver_fd, &sigval );
         if ( signum == SIG_VAR_TIMER )
         {
             /* check session timeout */
-            CheckTimeout( pState );
+            result = CheckTimeout( pState );
         }
         else if ( signum == SIG_VAR_PRINT )
         {
-            HandlePrintRequest( pState, sigval );
+            result = HandlePrintRequest( pState, sigval );
         }
-
+        else if ( signum == SIG_VAR_MODIFIED )
+        {
+            hVar = (VAR_HANDLE)sigval;
+            result = VAR_Get( pState->hVarServer, hVar, &varobj );
+            if ( result == EOK )
+            {
+                if ( hVar == pState->hSessionEnable )
+                {
+                    pState->enable = ( varobj.val.ui == 0 ) ? false : true;
+                    if ( pState->enable == false )
+                    {
+                        DeleteAllSessions( pState );
+                    }
+                }
+                else if ( hVar == pState->hSessionTimeout )
+                {
+                    pState->sessionTimeout = varobj.val.ui;
+                }
+                else
+                {
+                    result = ENOTSUP;
+                }
+            }
+        }
+        else
+        {
+            result = ENOTSUP;
+        }
     }
 
     return result;
@@ -1152,23 +1224,34 @@ static int ProcessClientRequest( SessionMgrState *pState,
     {
         memset( &resp, 0, sizeof( SessionResponse ) );
 
-        switch( pReq->type )
+        if ( pState->enable == true )
         {
-            case SESSION_REQUEST_NEW:
-                result = ProcessRequestNewSession( pState, pReq, &resp );
-                break;
+            switch( pReq->type )
+            {
+                case SESSION_REQUEST_NEW:
+                    result = ProcessRequestNewSession( pState, pReq, &resp );
+                    break;
 
-            case SESSION_REQUEST_DELETE:
-                result = ProcessRequestDeleteSession( pState, pReq, &resp );
-                break;
+                case SESSION_REQUEST_DELETE:
+                    result = ProcessRequestDeleteSession( pState, pReq, &resp );
+                    break;
 
-            case SESSION_REQUEST_VALIDATE:
-                result = ProcessRequestValidateSession( pState, pReq, &resp );
-                break;
+                case SESSION_REQUEST_VALIDATE:
+                    result = ProcessRequestValidateSession( pState,
+                                                            pReq,
+                                                            &resp );
+                    break;
 
-            default:
-                resp.responseCode = ENOTSUP;
-                break;
+                default:
+                    resp.responseCode = ENOTSUP;
+                    result = EOK;
+                    break;
+            }
+        }
+        else
+        {
+            resp.responseCode = ENOTSUP;
+            result = EOK;
         }
 
         resp.id = SESSION_MANAGER_ID;
@@ -1759,7 +1842,7 @@ static int CheckTimeout( SessionMgrState *pState )
             pointer to the session object to delete
 
 ==============================================================================*/
-void DeleteSession( SessionMgrState *pState, SessionInfo *pSessionInfo )
+static void DeleteSession( SessionMgrState *pState, SessionInfo *pSessionInfo )
 {
     SessionInfo *p;
     SessionInfo *pLast = NULL;
@@ -1801,6 +1884,50 @@ void DeleteSession( SessionMgrState *pState, SessionInfo *pSessionInfo )
             pState->pFreeSessions = pSessionInfo;
         }
     }
+}
+
+/*============================================================================*/
+/*  DeleteAllSessions                                                         */
+/*!
+    Delete all active sessions
+
+    The DeleteAllSessions function deletes all the active sessions
+    and moves them into the free session list
+
+    @param[in]
+        pState
+            pointer to the Session Manager state
+
+    @retval EOK all sessions deleted
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int DeleteAllSessions( SessionMgrState *pState )
+{
+    int result = EINVAL;
+    SessionInfo *p;
+    SessionInfo *pSessionInfo;
+
+    if ( pState != NULL )
+    {
+        p = pState->pActiveSessions;
+        while ( p != NULL )
+        {
+            pSessionInfo = p;
+            p = p->pNext;
+
+            /* put the session onto the free list */
+            pSessionInfo->pNext = pState->pFreeSessions;
+            pState->pFreeSessions = pSessionInfo;
+        }
+
+        /* clear the active list */
+        pState->pActiveSessions = NULL;
+
+        result = EOK;
+    }
+
+    return result;
 }
 
 /*============================================================================*/
