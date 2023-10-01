@@ -35,6 +35,9 @@ else
     echo "FAILED"
 fi
 
+# get session info verbose
+session -m validate -s $token -v
+
 # check invalid password
 echo -n "Checking invalid session: "
 session -m validate -s fsdhsjdhf

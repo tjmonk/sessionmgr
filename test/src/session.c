@@ -58,6 +58,7 @@ SOFTWARE.
 #include <errno.h>
 #include <syslog.h>
 #include <getopt.h>
+#include <grp.h>
 #include <sessionmgr/sessionmgr.h>
 
 /*==============================================================================
@@ -131,6 +132,9 @@ int main(int argc, char **argv)
     int result = EINVAL;
     char session[BUFSIZ];
     SessionState state;
+    SessionGroups grpinfo;
+    int i;
+    struct group *gr;
 
     /* initialize the Session Manager State */
     memset( &state, 0, sizeof (SessionState));
@@ -163,7 +167,29 @@ int main(int argc, char **argv)
     }
     else if ( strcmp( state.mode, "validate" ) == 0 )
     {
-        result = SESSIONMGR_Validate( state.session );
+        result = SESSIONMGR_Validate( state.session, &grpinfo );
+        if ( state.verbose == true )
+        {
+            printf("uid = %d\n", grpinfo.uid );
+            printf("gid = %d\n", grpinfo.gid );
+            if ( grpinfo.ngroups == -1 )
+            {
+                printf("Failed to get group list\n");
+            }
+            else if ( grpinfo.ngroups > 0 )
+            {
+                for( i=0; i < grpinfo.ngroups; i++ )
+                {
+                    printf( "%d", grpinfo.groups[i] );
+                    gr = getgrgid( grpinfo.groups[i] );
+                    if ( gr != NULL )
+                    {
+                        printf( " (%s)", gr->gr_name );
+                    }
+                    printf("\n");
+                }
+            }
+        }
     }
     else
     {

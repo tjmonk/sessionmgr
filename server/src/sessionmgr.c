@@ -50,6 +50,7 @@ SOFTWARE.
 #include <stdio.h>
 #include <stdlib.h>
 #include <pwd.h>
+#include <grp.h>
 #include <shadow.h>
 #include <crypt.h>
 #include <sys/types.h>
@@ -119,6 +120,9 @@ typedef struct sessionInfo
 
     /*! client reference */
     char reference[SESSION_MAX_REFERENCE_LEN+1];
+
+    /*! session group information */
+    SessionGroups grpinfo;
 
     /*! pointer to the next session info object in the list */
     struct sessionInfo *pNext;
@@ -203,7 +207,9 @@ static int ProcessRequestDeleteSession( SessionMgrState *pState,
 static int ProcessRequestValidateSession( SessionMgrState *pState,
                                           SessionRequest *pReq,
                                           SessionResponse *pResp );
-static int CheckPassword( const char* user, const char* password );
+static int CheckPassword( const char* user,
+                          const char* password,
+                          SessionGroups *grpinfo );
 static int SetupTimer( int s );
 static int HandlePrintRequest( SessionMgrState *pState, int32_t id );
 static SessionInfo *FindSession( SessionMgrState *pState,
@@ -1222,7 +1228,9 @@ static int ProcessRequestNewSession( SessionMgrState *pState,
         result = EOK;
 
         /* check if password is valid for the specified user */
-        rc = CheckPassword( pReq->username, pReq->password );
+        rc = CheckPassword( pReq->username,
+                            pReq->password,
+                            &pResp->grpinfo );
         if ( rc == EOK )
         {
             /* see if a session for this user/clientref already exists */
@@ -1234,6 +1242,11 @@ static int ProcessRequestNewSession( SessionMgrState *pState,
                 /* reset the timeout */
                 pSessionInfo->timeout = pState->sessionTimeout;
 
+                /* update the group information */
+                memcpy( &pSessionInfo->grpinfo,
+                        &pResp->grpinfo,
+                        sizeof(SessionGroups));
+
                 strcpy(pResp->sessionId, pSessionInfo->sessionId);
             }
             else
@@ -1244,6 +1257,11 @@ static int ProcessRequestNewSession( SessionMgrState *pState,
                 {
                     pResp->responseCode = EOK;
                     strcpy(pResp->sessionId, pSessionInfo->sessionId);
+
+                    /* update the group information */
+                    memcpy( &pSessionInfo->grpinfo,
+                            &pResp->grpinfo,
+                            sizeof(SessionGroups));
                 }
                 else
                 {
@@ -1356,6 +1374,11 @@ static int ProcessRequestValidateSession( SessionMgrState *pState,
         pSessionInfo = FindSessionById( pState, pReq->sessionId );
         if ( pSessionInfo != NULL )
         {
+            /* get the group information for this session */
+            memcpy( &pResp->grpinfo,
+                    &pSessionInfo->grpinfo,
+                    sizeof(SessionGroups) );
+
             pResp->responseCode = EOK;
         }
         else
@@ -1384,27 +1407,49 @@ static int ProcessRequestValidateSession( SessionMgrState *pState,
         password
             pointer to the user's password
 
+    @param[in,out]
+        grpinfo
+            pointer to a SessionGroups object to store the group info
+
     @retval EOK user is authenticated
     @retval EINVAL invalid arguments
     @retval ENOENT user does not exist
     @retval EACCES permission denied
 
 ==============================================================================*/
-static int CheckPassword( const char* user, const char* password )
+static int CheckPassword( const char* user,
+                          const char* password,
+                          SessionGroups *grpinfo )
 {
     int result = EINVAL;
     struct passwd *passwordEntry = NULL;
     struct spwd *shadowEntry = NULL;
     char *encryptedPassword = NULL;
     char *pwd = NULL;
+    int rc;
 
     if ( ( user != NULL ) &&
-         ( password != NULL ) )
+         ( password != NULL ) &&
+         ( grpinfo != NULL ))
     {
         passwordEntry = getpwnam( user );
         if ( passwordEntry != NULL )
         {
             pwd = passwordEntry->pw_passwd;
+            grpinfo->uid = passwordEntry->pw_uid;
+            grpinfo->gid = passwordEntry->pw_gid;
+            grpinfo->ngroups = SESSION_USER_MAX_GROUPS;
+
+            /* get the group list */
+            rc = getgrouplist( user,
+                               grpinfo->gid,
+                               grpinfo->groups,
+                               &grpinfo->ngroups );
+
+            if ( rc == -1 )
+            {
+                grpinfo->ngroups = -1;
+            }
 
             if ( strcmp( pwd, "x" ) != 0 )
             {

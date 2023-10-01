@@ -258,12 +258,16 @@ int SESSIONMGR_EndSession( char *session )
         session
             pointer to the session identifier
 
+    @param[in,out]
+        grpinfo
+            pointer to the SessionGroups object which gives session group info
+
     @retval EOK session is valid
     @retval EACCES session does not have access
     @retval EINVAL invalid arguments
 
 ==============================================================================*/
-int SESSIONMGR_Validate( char *session )
+int SESSIONMGR_Validate( char *session, SessionGroups *grpinfo )
 {
     int sock;
     ssize_t len;
@@ -272,7 +276,8 @@ int SESSIONMGR_Validate( char *session )
     SessionResponse resp;
     int result = EINVAL;
 
-    if ( session != NULL )
+    if ( ( session != NULL ) &&
+         ( grpinfo != NULL ) )
     {
         sock = sessionmgr_Connect();
         if( sock >= 0 )
@@ -303,6 +308,7 @@ int SESSIONMGR_Validate( char *session )
                 else
                 {
                     result = resp.responseCode;
+                    memcpy( grpinfo, &resp.grpinfo, sizeof(SessionGroups) );
                 }
             }
         }
