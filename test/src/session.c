@@ -58,6 +58,7 @@ SOFTWARE.
 #include <errno.h>
 #include <syslog.h>
 #include <getopt.h>
+#include <pwd.h>
 #include <grp.h>
 #include <sessionmgr/sessionmgr.h>
 
@@ -132,9 +133,13 @@ int main(int argc, char **argv)
     int result = EINVAL;
     char session[BUFSIZ];
     SessionState state;
-    SessionGroups grpinfo;
+    uid_t uid;
     int i;
+    struct passwd *pwd;
     struct group *gr;
+    gid_t groups[10];
+    int n = 10;
+    int rc;
 
     /* initialize the Session Manager State */
     memset( &state, 0, sizeof (SessionState));
@@ -167,32 +172,43 @@ int main(int argc, char **argv)
     }
     else if ( strcmp( state.mode, "validate" ) == 0 )
     {
-        result = SESSIONMGR_Validate( state.session, &grpinfo );
+        result = SESSIONMGR_Validate( state.session, &uid );
         if ( state.verbose == true )
         {
-            printf("uid = %d\n", grpinfo.uid );
-            printf("gid = %d\n", grpinfo.gid );
-            if ( grpinfo.ngroups == -1 )
+            pwd = getpwuid( uid );
+            if ( pwd != NULL )
             {
-                printf("Failed to get group list\n");
-            }
-            else if ( grpinfo.ngroups > 0 )
-            {
-                for( i=0; i < grpinfo.ngroups; i++ )
+                printf("user = %s\n", pwd->pw_name );
+                printf("uid = %d\n", pwd->pw_uid );
+                printf("gid = %d\n", pwd->pw_gid );
+
+                rc = getgrouplist( pwd->pw_name, pwd->pw_gid, groups, &n );
+                if ( rc != -1 )
                 {
-                    printf( "%d", grpinfo.groups[i] );
-                    gr = getgrgid( grpinfo.groups[i] );
-                    if ( gr != NULL )
+                    if ( n > 0 )
                     {
-                        printf( " (%s)", gr->gr_name );
+                        for( i=0; i < n; i++ )
+                        {
+                            printf( "%d", groups[i] );
+                            gr = getgrgid( groups[i] );
+                            if ( gr != NULL )
+                            {
+                                printf( " (%s)", gr->gr_name );
+                            }
+                            printf("\n");
+                        }
                     }
-                    printf("\n");
+                }
+                else
+                {
+                    printf("Failed to get group list\n");
                 }
             }
         }
     }
     else
     {
+        fprintf(stderr, "Mode must be one of login, logout, or validate\n");
         result = ENOTSUP;
     }
 

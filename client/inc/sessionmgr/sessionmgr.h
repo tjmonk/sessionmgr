@@ -124,23 +124,6 @@ typedef struct sessionRequest
 
 } SessionRequest;
 
-/*! return the user and groups ids for the current session */
-typedef struct sessionGroups
-{
-    /*! user id */
-    uid_t uid;
-
-    /*! group id */
-    gid_t gid;
-
-    /*! groups */
-    gid_t groups[ SESSION_USER_MAX_GROUPS ];
-
-    /*! number of groups in the group array */
-    int ngroups;
-
-} SessionGroups;
-
 /*! session response */
 typedef struct sessionResponse
 {
@@ -156,8 +139,8 @@ typedef struct sessionResponse
     /*! response buffer */
     char sessionId[SESSION_ID_LEN+1];
 
-    /*! session group information*/
-    SessionGroups grpinfo;
+    /*! session user id */
+    uid_t uid;
 
 } SessionResponse;
 
@@ -171,8 +154,14 @@ int SESSIONMGR_NewSession( char *username,
                            char *session,
                            size_t buflen );
 
-int SESSIONMGR_EndSession( char *session );
+int SESSIONMGR_EndSession( const char *session );
 
-int SESSIONMGR_Validate( char *session, SessionGroups *grpinfo );
+int SESSIONMGR_Validate( const char *session, uid_t *uid );
+
+char *SESSIONMGR_GetSessionFromCookie( const char *cookie,
+                                       char *session,
+                                       size_t len );
+
+int SESSIONMGR_Authenticate( const char *session );
 
 #endif

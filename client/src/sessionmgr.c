@@ -125,6 +125,7 @@ int SESSIONMGR_NewSession( char *username,
          ( session != NULL ) &&
          ( buflen > SESSION_ID_LEN ) )
     {
+        result = ECONNREFUSED;
         sock = sessionmgr_Connect();
         if( sock >= 0 )
         {
@@ -155,6 +156,7 @@ int SESSIONMGR_NewSession( char *username,
             }
             else
             {
+
                 len = sizeof( SessionResponse );
                 n = read( sock, &resp, len );
                 if ( n != len )
@@ -196,7 +198,7 @@ int SESSIONMGR_NewSession( char *username,
     @retval EINVAL invalid arguments
 
 ==============================================================================*/
-int SESSIONMGR_EndSession( char *session )
+int SESSIONMGR_EndSession( const char *session )
 {
     int sock;
     ssize_t len;
@@ -259,15 +261,15 @@ int SESSIONMGR_EndSession( char *session )
             pointer to the session identifier
 
     @param[in,out]
-        grpinfo
-            pointer to the SessionGroups object which gives session group info
+        uid
+            pointer to a location to store the session user id
 
     @retval EOK session is valid
     @retval EACCES session does not have access
     @retval EINVAL invalid arguments
 
 ==============================================================================*/
-int SESSIONMGR_Validate( char *session, SessionGroups *grpinfo )
+int SESSIONMGR_Validate( const char *session, uid_t *uid )
 {
     int sock;
     ssize_t len;
@@ -277,7 +279,7 @@ int SESSIONMGR_Validate( char *session, SessionGroups *grpinfo )
     int result = EINVAL;
 
     if ( ( session != NULL ) &&
-         ( grpinfo != NULL ) )
+         ( uid != NULL ) )
     {
         sock = sessionmgr_Connect();
         if( sock >= 0 )
@@ -308,7 +310,10 @@ int SESSIONMGR_Validate( char *session, SessionGroups *grpinfo )
                 else
                 {
                     result = resp.responseCode;
-                    memcpy( grpinfo, &resp.grpinfo, sizeof(SessionGroups) );
+                    if ( result == EOK )
+                    {
+                        *uid = resp.uid;
+                    }
                 }
             }
         }
@@ -353,6 +358,116 @@ static int sessionmgr_Connect()
     }
 
     return sock;
+}
+
+/*============================================================================*/
+/*  SESSIONMGR_GetSessionFromCookie                                           */
+/*!
+    Get a session identifier from within an HTTP cookie
+
+    The SESSIONMGR_GetSessionFromCookie extracts a session identifier
+    from within an HTTP cookie.
+
+    An HTTP cookie string is a semicolon separated list of name=value
+    pairs.  The name of the session cookie is "session", so this function
+    searches for "session=" within the cookie string and returns its
+    associated value.
+
+    @param[in]
+        cookie
+            pointer to a cookie string
+
+    @param[in,out]
+        session
+            pointer to a buffer to store the session value
+
+    @param[in]
+        len
+            length of the buffer to store the session value
+            ( must be greater than or equal to SESSION_ID_LEN+1 )
+
+    @retval pointer to the session value
+    @retval NULL if the session does not exist or cannot be extracted
+
+==============================================================================*/
+char *SESSIONMGR_GetSessionFromCookie( const char *cookie,
+                                       char *session,
+                                       size_t len )
+{
+    char *p;
+    char *start;
+    size_t l;
+    char *result = NULL;
+
+    if ( ( cookie != NULL ) &&
+         ( session != NULL ) &&
+         ( len >= SESSION_ID_LEN + 1 ) )
+    {
+        p = strstr(cookie, "session=");
+        if ( p != NULL )
+        {
+            p += 8;
+        }
+
+        start = p;
+        p = strchr(start, ';');
+        if ( p != NULL )
+        {
+            l = p - start;
+        }
+        else
+        {
+            l = strlen( start );
+        }
+
+        if ( l < len )
+        {
+            memcpy( session, start, l );
+            session[l] = 0;
+
+            result = session;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  SESSIONMGR_Authenticate                                                   */
+/*!
+    Authenticate and set the effective user id for the session
+
+    The SESSIONMGR_Authenticate authenticates the specified session
+    and then sets the effective user identifier for the current
+    process to that of the user associated with the session.
+
+    @param[in]
+        session
+            pointer to the session to authenticate
+
+    @retval EOK session is authenticated
+    @retval EINVAL invalid arguments
+    @retval EACCES permission denied
+
+==============================================================================*/
+int SESSIONMGR_Authenticate( const char *session )
+{
+    int result = EINVAL;
+    uid_t uid;
+
+    if ( session != NULL )
+    {
+        if ( SESSIONMGR_Validate( session, &uid ) == EOK )
+        {
+            result = ( seteuid(uid) == 0 ) ? EOK : errno;
+        }
+        else
+        {
+            result = EACCES;
+        }
+    }
+
+    return result;
 }
 
 /*! @}

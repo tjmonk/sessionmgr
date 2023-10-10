@@ -86,6 +86,11 @@ SOFTWARE.
 #define SESSION_TIMEOUT_NAME "/sys/session/timeout"
 #endif
 
+/*! name of variable to enable automatic timeout extension */
+#ifndef SESSION_AUTOEXTEND_NAME
+#define SESSION_AUTOEXTEND_NAME "/sys/session/autoextend"
+#endif
+
 /*! timer notification */
 #define TIMER_NOTIFICATION SIGRTMIN+5
 
@@ -126,8 +131,8 @@ typedef struct sessionInfo
     /*! client reference */
     char reference[SESSION_MAX_REFERENCE_LEN+1];
 
-    /*! session group information */
-    SessionGroups grpinfo;
+    /*! session user information */
+    uid_t uid;
 
     /*! pointer to the next session info object in the list */
     struct sessionInfo *pNext;
@@ -158,6 +163,9 @@ typedef struct sessionMgrState
     /*! handle to the session manager enable variable */
     VAR_HANDLE hSessionTimeout;
 
+    /*! handle to the autoextend variable */
+    VAR_HANDLE hAutoExtend;
+
     /*! set of sockets waiting to be read */
     fd_set read_fds;
 
@@ -184,6 +192,9 @@ typedef struct sessionMgrState
 
     /*! enable */
     bool enable;
+
+    /*! automatic extension of timeout on validation */
+    bool autoextend;
 
 } SessionMgrState;
 
@@ -220,7 +231,7 @@ static int ProcessRequestValidateSession( SessionMgrState *pState,
                                           SessionResponse *pResp );
 static int CheckPassword( const char* user,
                           const char* password,
-                          SessionGroups *grpinfo );
+                          uid_t *uid );
 static int SetupTimer( int s );
 static int HandlePrintRequest( SessionMgrState *pState, int32_t id );
 static SessionInfo *FindSession( SessionMgrState *pState,
@@ -270,8 +281,20 @@ int main(int argc, char **argv)
 {
     int result = EINVAL;
 
+    /* remove any previous session manager API endpoint */
+    unlink( SESSION_MANAGER_NAME );
+
     /* initialize the Session Manager State */
     memset( &state, 0, sizeof (SessionMgrState));
+
+    /* set default state to enabled */
+    state.enable = true;
+
+    /* reset timeout on validate */
+    state.autoextend = false;
+
+    /* set default session timeout */
+    state.sessionTimeout = DEFAULT_SESSION_TIMEOUT;
 
     /* Process the command line options */
     ProcessOptions( argc, argv, &state );
@@ -520,9 +543,6 @@ static int SessionMgrInit( SessionMgrState *pState )
 
     if ( pState != NULL )
     {
-        /* set default session timeout */
-        pState->sessionTimeout = DEFAULT_SESSION_TIMEOUT;
-
         /* create a listening socket */
         pState->sock = socket(AF_UNIX, SOCK_STREAM, 0);
         if (pState->sock < 0)
@@ -613,6 +633,27 @@ static int SetupNotifications( SessionMgrState *pState )
             /* set up modified notification */
             rc = VAR_Notify( pState->hVarServer,
                              pState->hSessionEnable,
+                             NOTIFY_MODIFIED );
+            if ( rc != EOK )
+            {
+                result = rc;
+            }
+        }
+
+        /* set up modified notification for optional autoextend variable */
+        pState->hAutoExtend = VAR_FindByName( pState->hVarServer,
+                                              SESSION_AUTOEXTEND_NAME );
+        if ( pState->hAutoExtend != VAR_INVALID )
+        {
+            rc = VAR_Get( pState->hVarServer, pState->hAutoExtend, &varobj );
+            if ( rc == EOK )
+            {
+                pState->autoextend = varobj.val.ui != 0 ? true : false;
+            }
+
+            /* set up modified notification */
+            rc = VAR_Notify( pState->hVarServer,
+                             pState->hAutoExtend,
                              NOTIFY_MODIFIED );
             if ( rc != EOK )
             {
@@ -1014,6 +1055,10 @@ static int HandleVarNotification( SessionMgrState *pState )
                 {
                     pState->sessionTimeout = varobj.val.ui;
                 }
+                else if ( hVar == pState->hAutoExtend )
+                {
+                    pState->autoextend = ( varobj.val.ui == 0 ) ? false : true;
+                }
                 else
                 {
                     result = ENOTSUP;
@@ -1303,17 +1348,20 @@ static int ProcessRequestNewSession( SessionMgrState *pState,
     int result = EINVAL;
     SessionInfo *pSessionInfo;
     int rc;
+    uid_t uid;
 
     if ( ( pState != NULL ) &&
          ( pReq != NULL ) &&
          ( pResp != NULL ) )
     {
+        memset( pResp, 0, sizeof( SessionResponse ));
+
         result = EOK;
 
         /* check if password is valid for the specified user */
         rc = CheckPassword( pReq->username,
                             pReq->password,
-                            &pResp->grpinfo );
+                            &uid );
         if ( rc == EOK )
         {
             /* see if a session for this user/clientref already exists */
@@ -1325,11 +1373,11 @@ static int ProcessRequestNewSession( SessionMgrState *pState,
                 /* reset the timeout */
                 pSessionInfo->timeout = pState->sessionTimeout;
 
-                /* update the group information */
-                memcpy( &pSessionInfo->grpinfo,
-                        &pResp->grpinfo,
-                        sizeof(SessionGroups));
+                /* get the user id */
+                pSessionInfo->uid = uid;
+                pResp->uid = uid;
 
+                /* get the session id */
                 strcpy(pResp->sessionId, pSessionInfo->sessionId);
             }
             else
@@ -1339,12 +1387,9 @@ static int ProcessRequestNewSession( SessionMgrState *pState,
                 if ( pSessionInfo != NULL )
                 {
                     pResp->responseCode = EOK;
+                    pSessionInfo->uid = uid;
+                    pResp->uid = uid;
                     strcpy(pResp->sessionId, pSessionInfo->sessionId);
-
-                    /* update the group information */
-                    memcpy( &pSessionInfo->grpinfo,
-                            &pResp->grpinfo,
-                            sizeof(SessionGroups));
                 }
                 else
                 {
@@ -1450,6 +1495,8 @@ static int ProcessRequestValidateSession( SessionMgrState *pState,
          ( pReq != NULL ) &&
          ( pResp != NULL ) )
     {
+        memset( pResp, 0, sizeof( SessionResponse ));
+
         result = EOK;
 
         strcpy( pResp->sessionId, pReq->sessionId );
@@ -1457,12 +1504,15 @@ static int ProcessRequestValidateSession( SessionMgrState *pState,
         pSessionInfo = FindSessionById( pState, pReq->sessionId );
         if ( pSessionInfo != NULL )
         {
-            /* get the group information for this session */
-            memcpy( &pResp->grpinfo,
-                    &pSessionInfo->grpinfo,
-                    sizeof(SessionGroups) );
-
             pResp->responseCode = EOK;
+
+            if ( pState->autoextend == true )
+            {
+                /* reset timeout back to its default value */
+                pSessionInfo->timeout = pState->sessionTimeout;
+            }
+
+            pResp->uid = pSessionInfo->uid;
         }
         else
         {
@@ -1480,7 +1530,8 @@ static int ProcessRequestValidateSession( SessionMgrState *pState,
 
     The CheckPassword function checks the specified user's password
     against the entry in the /etc/passwd or /etc/shadow file for
-    that user.
+    that user.  If a match is found the user id for that user is
+    returned
 
     @param[in]
         user
@@ -1491,8 +1542,8 @@ static int ProcessRequestValidateSession( SessionMgrState *pState,
             pointer to the user's password
 
     @param[in,out]
-        grpinfo
-            pointer to a SessionGroups object to store the group info
+        uid
+            pointer to a location to store the user identifier
 
     @retval EOK user is authenticated
     @retval EINVAL invalid arguments
@@ -1502,37 +1553,22 @@ static int ProcessRequestValidateSession( SessionMgrState *pState,
 ==============================================================================*/
 static int CheckPassword( const char* user,
                           const char* password,
-                          SessionGroups *grpinfo )
+                          uid_t *uid )
 {
     int result = EINVAL;
     struct passwd *passwordEntry = NULL;
     struct spwd *shadowEntry = NULL;
     char *encryptedPassword = NULL;
     char *pwd = NULL;
-    int rc;
 
     if ( ( user != NULL ) &&
          ( password != NULL ) &&
-         ( grpinfo != NULL ))
+         ( uid != NULL ))
     {
         passwordEntry = getpwnam( user );
         if ( passwordEntry != NULL )
         {
             pwd = passwordEntry->pw_passwd;
-            grpinfo->uid = passwordEntry->pw_uid;
-            grpinfo->gid = passwordEntry->pw_gid;
-            grpinfo->ngroups = SESSION_USER_MAX_GROUPS;
-
-            /* get the group list */
-            rc = getgrouplist( user,
-                               grpinfo->gid,
-                               grpinfo->groups,
-                               &grpinfo->ngroups );
-
-            if ( rc == -1 )
-            {
-                grpinfo->ngroups = -1;
-            }
 
             if ( strcmp( pwd, "x" ) != 0 )
             {
@@ -1551,7 +1587,15 @@ static int CheckPassword( const char* user,
             if ( ( encryptedPassword != NULL ) &&
                  ( pwd != NULL ) )
             {
-                result = strcmp( encryptedPassword, pwd ) == 0 ? EOK : EACCES;
+                if ( strcmp( encryptedPassword, pwd ) == 0 )
+                {
+                    *uid = passwordEntry->pw_uid;
+                    result = EOK;
+                }
+                else
+                {
+                    result = EACCES;
+                }
             }
             else
             {
@@ -1615,13 +1659,12 @@ static SessionInfo *FindSession( SessionMgrState *pState,
 }
 
 /*============================================================================*/
-/*  FindSession                                                               */
+/*  FindSessionById                                                           */
 /*!
     Search for a session
 
     The FindSession function searches the active session list for a
-    session which matches the user name and password contained in the
-    SessionRequest
+    session which matches the specified session identifier.
 
     @param[in]
         pState
@@ -1807,17 +1850,20 @@ static int CheckTimeout( SessionMgrState *pState )
     {
         result = EOK;
 
-        pSessionInfo = pState->pActiveSessions;
-        while( pSessionInfo != NULL )
+        if ( pState->sessionTimeout != 0 )
         {
-            p = pSessionInfo;
-            pSessionInfo = pSessionInfo->pNext;
-
-            p->timeout -= TIMER_S;
-            if ( p->timeout <= 0 )
+            pSessionInfo = pState->pActiveSessions;
+            while( pSessionInfo != NULL )
             {
-                /* remove the session from the active session list */
-                DeleteSession( pState, p );
+                p = pSessionInfo;
+                pSessionInfo = pSessionInfo->pNext;
+
+                p->timeout -= TIMER_S;
+                if ( p->timeout <= 0 )
+                {
+                    /* remove the session from the active session list */
+                    DeleteSession( pState, p );
+                }
             }
         }
     }
@@ -1969,9 +2015,13 @@ static int PrintSessions( SessionMgrState *pState, int fd )
             }
 
             dprintf( fd,
-                     "{ \"user\": \"%s\", \"reference\": \"%s\","
-                     "\"session\": \"%8.8s\", \"remaining\": %d }",
+                     "{ \"user\": \"%s\", "
+                     "\"userid\": \"%d\","
+                     "\"reference\": \"%s\","
+                     "\"session\": \"%8.8s\","
+                     "\"remaining\": %d }",
                      pSessionInfo->username,
+                     pSessionInfo->uid,
                      pSessionInfo->reference,
                      pSessionInfo->sessionId,
                      pSessionInfo->timeout );
