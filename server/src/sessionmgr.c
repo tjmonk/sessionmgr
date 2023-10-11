@@ -1295,7 +1295,7 @@ static int ProcessClientRequest( SessionMgrState *pState,
         }
         else
         {
-            resp.responseCode = ENOTSUP;
+            resp.responseCode = EACCES;
             result = EOK;
         }
 
