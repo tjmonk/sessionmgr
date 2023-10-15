@@ -78,17 +78,22 @@ SOFTWARE.
 
 /*! name of variable to enable session handling */
 #ifndef SESSION_ENABLE_NAME
-#define SESSION_ENABLE_NAME "/sys/session/enable"
+#define SESSION_ENABLE_NAME "/sys/session/cfg_enable"
 #endif
 
 /*! name of variable to enable session handling */
 #ifndef SESSION_TIMEOUT_NAME
-#define SESSION_TIMEOUT_NAME "/sys/session/timeout"
+#define SESSION_TIMEOUT_NAME "/sys/session/cfg_timeout"
 #endif
 
 /*! name of variable to enable automatic timeout extension */
 #ifndef SESSION_AUTOEXTEND_NAME
-#define SESSION_AUTOEXTEND_NAME "/sys/session/autoextend"
+#define SESSION_AUTOEXTEND_NAME "/sys/session/cfg_autoextend"
+#endif
+
+/*! name of variable to enable sesssion auditing */
+#ifndef SESSION_AUDIT_NAME
+#define SESSION_AUDIT_NAME "/sys/session/cfg_audit"
 #endif
 
 /*! timer notification */
@@ -166,6 +171,9 @@ typedef struct sessionMgrState
     /*! handle to the autoextend variable */
     VAR_HANDLE hAutoExtend;
 
+    /*! handle to the audit variable */
+    VAR_HANDLE hAudit;
+
     /*! set of sockets waiting to be read */
     fd_set read_fds;
 
@@ -188,16 +196,35 @@ typedef struct sessionMgrState
     SessionInfo *pActiveSessions;
 
     /*! session timeout */
-    int sessionTimeout;
+    uint16_t sessionTimeout;
 
     /*! enable */
-    bool enable;
+    uint16_t enable;
 
     /*! automatic extension of timeout on validation */
-    bool autoextend;
+    uint16_t autoextend;
+
+    /*! session auditing */
+    uint16_t audit;
 
 } SessionMgrState;
 
+/*! handle session configuration variables */
+typedef struct session_vars
+{
+    /*! variable name */
+    char *pName;
+
+    /*! pointer to the variable handle */
+    VAR_HANDLE *pVarHandle;
+
+    /*! pointer to the variable value */
+    uint16_t *pVal;
+
+    /*! type of notification */
+    NotificationType notifyType;
+
+} SessionVars;
 
 /*==============================================================================
         Private function declarations
@@ -215,6 +242,7 @@ static int UpdateFDSet( SessionMgrState *pState );
 static int ProcessSockets( SessionMgrState *pState );
 static int HandleNewClient( SessionMgrState *pState );
 static int HandleVarNotification( SessionMgrState *pState );
+static int HandleVarChanged( SessionMgrState *pState, VAR_HANDLE hVar );
 static int HandleClientRequest( SessionMgrState *pState, fd_set *read_fds );
 static int ReadClientRequest( SessionMgrState *pState, int fd );
 static int ProcessClientRequest( SessionMgrState *pState,
@@ -253,6 +281,20 @@ static int PrintSessions( SessionMgrState *pState, int fd );
 /*! session manager state object */
 static SessionMgrState state;
 
+/*! session variables */
+static const SessionVars session_vars[] = {
+    {SESSION_INFO_NAME,
+        &state.hSessionInfo, NULL, NOTIFY_PRINT},
+    {SESSION_TIMEOUT_NAME,
+        &state.hSessionTimeout, &state.sessionTimeout, NOTIFY_MODIFIED},
+    {SESSION_AUTOEXTEND_NAME,
+        &state.hAutoExtend, &state.autoextend, NOTIFY_MODIFIED},
+    {SESSION_AUDIT_NAME,
+        &state.hAudit, &state.audit, NOTIFY_MODIFIED},
+    {SESSION_ENABLE_NAME,
+        &state.hSessionEnable, &state.enable, NOTIFY_MODIFIED}
+};
+
 /*==============================================================================
         Public function definitions
 ==============================================================================*/
@@ -288,10 +330,13 @@ int main(int argc, char **argv)
     memset( &state, 0, sizeof (SessionMgrState));
 
     /* set default state to enabled */
-    state.enable = true;
+    state.enable = 1;
 
     /* reset timeout on validate */
-    state.autoextend = false;
+    state.autoextend = 0;
+
+    /* disable auditing by default */
+    state.audit = 0;
 
     /* set default session timeout */
     state.sessionTimeout = DEFAULT_SESSION_TIMEOUT;
@@ -598,87 +643,58 @@ static int SetupNotifications( SessionMgrState *pState )
     int result = EINVAL;
     int rc;
     VarObject varobj;
+    size_t n = sizeof session_vars / sizeof session_vars[0];
+    size_t i;
+    VAR_HANDLE *pVarHandle;
+    char *pName;
+    uint16_t *pVal;
+    NotificationType notifyType;
 
     if ( pState != NULL )
     {
         /* assume everything is ok until it is not */
         result = EOK;
 
-        /* set up print notification for optional session info variable */
-        pState->hSessionInfo = VAR_FindByName( pState->hVarServer,
-                                               SESSION_INFO_NAME );
-        if ( pState->hSessionInfo != VAR_INVALID )
+        for ( i = 0; i < n ; i++ )
         {
-            /* set up print notification */
-            rc = VAR_Notify( pState->hVarServer,
-                             pState->hSessionInfo,
-                             NOTIFY_PRINT );
-            if ( rc != EOK )
-            {
-                result = rc;
-            }
-        }
+            pVarHandle = session_vars[i].pVarHandle;
+            pName = session_vars[i].pName;
+            pVal = session_vars[i].pVal;
+            notifyType = session_vars[i].notifyType;
 
-        /* set up modified notification for optional session enable variable */
-        pState->hSessionEnable = VAR_FindByName( pState->hVarServer,
-                                                 SESSION_ENABLE_NAME );
-        if ( pState->hSessionEnable != VAR_INVALID )
-        {
-            rc = VAR_Get( pState->hVarServer, pState->hSessionEnable, &varobj );
-            if ( rc == EOK )
+            if ( ( pVarHandle != NULL ) &&
+                 ( pName != NULL ) )
             {
-                pState->enable = varobj.val.ui != 0 ? true : false;
-            }
+                /* get variable reference */
+                *pVarHandle = VAR_FindByName( pState->hVarServer, pName );
+                if ( *pVarHandle != VAR_INVALID )
+                {
+                    /* get initial value */
+                    if ( pVal != NULL )
+                    {
+                        rc = VAR_Get( pState->hVarServer, *pVarHandle, &varobj);
+                        if ( rc == EOK )
+                        {
+                            *pVal = varobj.val.ui;
+                        }
+                        else
+                        {
+                            result = rc;
+                        }
+                    }
 
-            /* set up modified notification */
-            rc = VAR_Notify( pState->hVarServer,
-                             pState->hSessionEnable,
-                             NOTIFY_MODIFIED );
-            if ( rc != EOK )
-            {
-                result = rc;
-            }
-        }
-
-        /* set up modified notification for optional autoextend variable */
-        pState->hAutoExtend = VAR_FindByName( pState->hVarServer,
-                                              SESSION_AUTOEXTEND_NAME );
-        if ( pState->hAutoExtend != VAR_INVALID )
-        {
-            rc = VAR_Get( pState->hVarServer, pState->hAutoExtend, &varobj );
-            if ( rc == EOK )
-            {
-                pState->autoextend = varobj.val.ui != 0 ? true : false;
-            }
-
-            /* set up modified notification */
-            rc = VAR_Notify( pState->hVarServer,
-                             pState->hAutoExtend,
-                             NOTIFY_MODIFIED );
-            if ( rc != EOK )
-            {
-                result = rc;
-            }
-        }
-
-        /* set up modified notification for optional session timeout variable */
-        pState->hSessionTimeout = VAR_FindByName( pState->hVarServer,
-                                                 SESSION_TIMEOUT_NAME );
-        if ( pState->hSessionTimeout != VAR_INVALID )
-        {
-            rc = VAR_Get(pState->hVarServer, pState->hSessionTimeout, &varobj );
-            if ( rc == EOK )
-            {
-                pState->sessionTimeout = varobj.val.ui;
-            }
-
-            /* set up modified notification */
-            rc = VAR_Notify( pState->hVarServer,
-                             pState->hSessionTimeout,
-                             NOTIFY_MODIFIED );
-            if ( rc != EOK )
-            {
-                result = rc;
+                    /* set up notifications */
+                    if ( notifyType != NOTIFY_NONE )
+                    {
+                        rc = VAR_Notify( pState->hVarServer,
+                                         *pVarHandle,
+                                         notifyType );
+                        if ( rc != EOK )
+                        {
+                            result = rc;
+                        }
+                    }
+                }
             }
         }
 
@@ -1020,7 +1036,6 @@ static int HandleVarNotification( SessionMgrState *pState )
     int signum;
     int32_t sigval;
     VAR_HANDLE hVar;
-    VarObject varobj;
 
     if ( pState != NULL )
     {
@@ -1040,34 +1055,69 @@ static int HandleVarNotification( SessionMgrState *pState )
         else if ( signum == SIG_VAR_MODIFIED )
         {
             hVar = (VAR_HANDLE)sigval;
-            result = VAR_Get( pState->hVarServer, hVar, &varobj );
-            if ( result == EOK )
+            result = HandleVarChanged( pState, hVar );
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  HandleVarChanged                                                          */
+/*!
+    Handle a varserver change notification
+
+    The HandleVarChangeed function handles a change notification
+    from the variable server.
+
+    @param[in]
+        pState
+            pointer to the Session Manager State
+
+    @param[in]
+        hVar
+            handle to the variable which was changed
+
+    @retval EOK varserver change notification handled successfully
+    @retval ENOTSUP variable not found
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int HandleVarChanged( SessionMgrState *pState, VAR_HANDLE hVar )
+{
+    int result = EINVAL;
+    VarObject varobj;
+    size_t n = sizeof session_vars / sizeof session_vars[0];
+    size_t i;
+    VAR_HANDLE *pVarHandle;
+    uint16_t *pVal;
+
+    if ( pState != NULL )
+    {
+        /* get the changed value */
+        result = VAR_Get( pState->hVarServer, hVar, &varobj );
+        if ( result == EOK )
+        {
+            for ( i = 0; i < n; i++ )
             {
-                if ( hVar == pState->hSessionEnable )
+                pVarHandle = session_vars[i].pVarHandle;
+                pVal = session_vars[i].pVal;
+
+                if ( ( pVarHandle != NULL ) &&
+                     ( pVal != NULL ) )
                 {
-                    pState->enable = ( varobj.val.ui == 0 ) ? false : true;
-                    if ( pState->enable == false )
+                    if ( hVar == *pVarHandle )
                     {
-                        DeleteAllSessions( pState );
+                        *pVal = varobj.val.ui;
                     }
                 }
-                else if ( hVar == pState->hSessionTimeout )
-                {
-                    pState->sessionTimeout = varobj.val.ui;
-                }
-                else if ( hVar == pState->hAutoExtend )
-                {
-                    pState->autoextend = ( varobj.val.ui == 0 ) ? false : true;
-                }
-                else
-                {
-                    result = ENOTSUP;
-                }
             }
-        }
-        else
-        {
-            result = ENOTSUP;
+
+            if ( ( hVar == pState->hSessionEnable ) &&
+                 ( pState->enable == 0 ) )
+            {
+                result = DeleteAllSessions( pState );
+            }
         }
     }
 
@@ -1762,6 +1812,15 @@ static SessionInfo *NewSession( SessionMgrState *pState,
                 /* add the new session to the head of the active session list */
                 pSession->pNext = pState->pActiveSessions;
                 pState->pActiveSessions = pSession;
+
+                if ( pState->audit != 0 )
+                {
+                    syslog( LOG_INFO,
+                            "NewSession: %s/%s (%8.8s)",
+                            pSession->username,
+                            pSession->reference,
+                            pSession->sessionId );
+                }
             }
         }
     }
@@ -1928,6 +1987,14 @@ static void DeleteSession( SessionMgrState *pState, SessionInfo *pSessionInfo )
             /* place the deleted session on the free session list */
             pSessionInfo->pNext = pState->pFreeSessions;
             pState->pFreeSessions = pSessionInfo;
+
+            if ( pState->audit != 0 )
+            {
+                syslog( LOG_INFO,
+                        "Session %s:%s terminated",
+                        pSessionInfo->username,
+                        pSessionInfo->reference );
+            }
         }
     }
 }
@@ -1969,6 +2036,11 @@ static int DeleteAllSessions( SessionMgrState *pState )
 
         /* clear the active list */
         pState->pActiveSessions = NULL;
+
+        if ( pState->audit != 0 )
+        {
+            syslog( LOG_INFO, "All sessions deleted" );
+        }
 
         result = EOK;
     }
