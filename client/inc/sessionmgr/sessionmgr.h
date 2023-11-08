@@ -110,6 +110,14 @@ typedef struct sessionRequest
     /*! session manager request type */
     SessionRequestType type;
 
+    /*! payload length */
+    size_t payloadlen;
+
+} SessionRequest;
+
+/*! basic authorization request */
+typedef struct basicAuthRequest
+{
     /*! user name */
     char username[SESSION_MAX_USERNAME_LEN+1];
 
@@ -119,10 +127,7 @@ typedef struct sessionRequest
     /*! client reference */
     char reference[SESSION_MAX_REFERENCE_LEN+1];
 
-    /*! session identifier */
-    char sessionId[SESSION_ID_LEN+1];
-
-} SessionRequest;
+} BasicAuthRequest;
 
 /*! session response */
 typedef struct sessionResponse

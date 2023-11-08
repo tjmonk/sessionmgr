@@ -50,6 +50,7 @@ SOFTWARE.
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <sys/uio.h>
 #include <signal.h>
 #include <sys/un.h>
 #include <stdbool.h>
@@ -67,6 +68,7 @@ SOFTWARE.
         Private function declarations
 ==============================================================================*/
 static int sessionmgr_Connect();
+static int sendBasicAuthRequest( int sock, BasicAuthRequest *bar );
 
 /*==============================================================================
         Public function definitions
@@ -115,8 +117,8 @@ int SESSIONMGR_NewSession( char *username,
     int sock;
     ssize_t len;
     ssize_t n;
-    SessionRequest req;
     SessionResponse resp;
+    BasicAuthRequest bar;
     int result = EINVAL;
 
     if ( ( username != NULL ) &&
@@ -129,34 +131,25 @@ int SESSIONMGR_NewSession( char *username,
         sock = sessionmgr_Connect();
         if( sock >= 0 )
         {
-            req.id = SESSION_MANAGER_ID;
-            req.version = SESSION_MANAGER_VERSION;
-            req.type = SESSION_REQUEST_NEW;
-
-            strncpy( req.username,
+            strncpy( bar.username,
                      username,
                      SESSION_MAX_USERNAME_LEN );
-            req.username[SESSION_MAX_USERNAME_LEN] = 0;
+            bar.username[SESSION_MAX_USERNAME_LEN] = 0;
 
-            strncpy( req.password,
+            strncpy( bar.password,
                      password,
                      SESSION_MAX_PASSWORD_LEN );
-            req.password[SESSION_MAX_PASSWORD_LEN] = 0;
+            bar.password[SESSION_MAX_PASSWORD_LEN] = 0;
 
-            strncpy( req.reference,
+            strncpy( bar.reference,
                      reference,
                      SESSION_MAX_REFERENCE_LEN );
-            req.reference[SESSION_MAX_REFERENCE_LEN] = 0;
+            bar.reference[SESSION_MAX_REFERENCE_LEN] = 0;
 
-            len = sizeof( SessionRequest );
-            n = write( sock, &req, len );
-            if ( n != len )
-            {
-                result = EBADMSG;
-            }
-            else
-            {
+            result = sendBasicAuthRequest( sock, &bar );
 
+            if ( result == EOK )
+            {
                 len = sizeof( SessionResponse );
                 n = read( sock, &resp, len );
                 if ( n != len )
@@ -183,6 +176,57 @@ int SESSIONMGR_NewSession( char *username,
 }
 
 /*============================================================================*/
+/*  sendBasicAuthRequest                                                      */
+/*!
+    Send a Basic Authorization Request
+
+    The sendBasicAuthRequest function sends a basic authentication
+    request to the session manager server.
+
+    @param[in]
+        socker
+            open socket to the session manager server
+
+    @param[in]
+        bar
+            pointer to the BasicAuthRequest object to send
+
+    @retval EOK Basic Auth Request sent
+    @retval EINVAL invalid arguments
+    @retval EBADMSG incorrect number of sent bytes
+
+==============================================================================*/
+static int sendBasicAuthRequest( int sock, BasicAuthRequest *bar )
+{
+    SessionRequest req;
+    struct iovec iov[2];
+    size_t len;
+    size_t n;
+    int result = EINVAL;
+
+    if ( ( bar != NULL ) &&
+         ( sock != -1 ) )
+    {
+        req.id = SESSION_MANAGER_ID;
+        req.version = SESSION_MANAGER_VERSION;
+        req.type = SESSION_REQUEST_NEW;
+        req.payloadlen = sizeof(BasicAuthRequest);
+
+        iov[0].iov_base = &req;
+        iov[0].iov_len = sizeof(SessionRequest);
+
+        iov[1].iov_base = bar;
+        iov[1].iov_len = sizeof(BasicAuthRequest);
+
+        len = iov[0].iov_len + iov[1].iov_len;
+        n = writev( sock, iov, 2);
+        result = ( n == len ) ? EOK : EBADMSG;
+    }
+
+    return result;
+}
+
+/*============================================================================*/
 /*  SESSIONMGR_EndSession                                                     */
 /*!
     Terminate a session
@@ -195,6 +239,7 @@ int SESSIONMGR_NewSession( char *username,
 
     @retval EOK session terminated successfully
     @retval ENOENT session not found
+    @retval E2BIG session string is too big
     @retval EINVAL invalid arguments
 
 ==============================================================================*/
@@ -202,47 +247,59 @@ int SESSIONMGR_EndSession( const char *session )
 {
     int sock;
     ssize_t len;
+    size_t l;
     ssize_t n;
     SessionRequest req;
     SessionResponse resp;
+    struct iovec iov[2];
     int result = EINVAL;
 
     if ( session != NULL )
     {
-        sock = sessionmgr_Connect();
-        if( sock >= 0 )
+        l = strlen( session );
+        if ( l <= SESSION_ID_LEN )
         {
-            req.id = SESSION_MANAGER_ID;
-            req.version = SESSION_MANAGER_VERSION;
-            req.type = SESSION_REQUEST_DELETE;
-
-            strncpy( req.sessionId,
-                     session,
-                     SESSION_ID_LEN );
-            req.sessionId[SESSION_ID_LEN] = 0;
-
-            len = sizeof( SessionRequest );
-            n = write( sock, &req, len );
-            if ( n != len )
+            sock = sessionmgr_Connect();
+            if( sock >= 0 )
             {
-                result = EBADMSG;
-            }
-            else
-            {
-                len = sizeof( SessionResponse );
-                n = read( sock, &resp, len );
+                req.id = SESSION_MANAGER_ID;
+                req.version = SESSION_MANAGER_VERSION;
+                req.type = SESSION_REQUEST_DELETE;
+                req.payloadlen = l;
+
+                iov[0].iov_base = &req;
+                iov[0].iov_len = sizeof(SessionRequest);
+
+                iov[1].iov_base = (void *)session;
+                iov[1].iov_len = l;
+
+                len = iov[0].iov_len + iov[1].iov_len;
+                n = writev( sock, iov, 2 );
                 if ( n != len )
                 {
                     result = EBADMSG;
                 }
                 else
                 {
-                    result = resp.responseCode;
+                    len = sizeof( SessionResponse );
+                    n = read( sock, &resp, len );
+                    if ( n != len )
+                    {
+                        result = EBADMSG;
+                    }
+                    else
+                    {
+                        result = resp.responseCode;
+                    }
                 }
             }
-        }
 
-        close( sock );
+            close( sock );
+        }
+        else
+        {
+            result = E2BIG;
+        }
     }
 
     return result;
@@ -274,51 +331,59 @@ int SESSIONMGR_Validate( const char *session, uid_t *uid )
     int sock;
     ssize_t len;
     ssize_t n;
+    size_t l;
     SessionRequest req;
     SessionResponse resp;
+    struct iovec iov[2];
     int result = EINVAL;
 
     if ( ( session != NULL ) &&
          ( uid != NULL ) )
     {
-        sock = sessionmgr_Connect();
-        if( sock >= 0 )
+        l = strlen( session );
+        if ( l <= SESSION_ID_LEN )
         {
-            req.id = SESSION_MANAGER_ID;
-            req.version = SESSION_MANAGER_VERSION;
-            req.type = SESSION_REQUEST_VALIDATE;
-
-            strncpy( req.sessionId,
-                     session,
-                     SESSION_ID_LEN );
-            req.sessionId[SESSION_ID_LEN] = 0;
-
-            len = sizeof( SessionRequest );
-            n = write( sock, &req, len );
-            if ( n != len )
+            sock = sessionmgr_Connect();
+            if( sock >= 0 )
             {
-                result = EBADMSG;
-            }
-            else
-            {
-                len = sizeof( SessionResponse );
-                n = read( sock, &resp, len );
+                req.id = SESSION_MANAGER_ID;
+                req.version = SESSION_MANAGER_VERSION;
+                req.type = SESSION_REQUEST_VALIDATE;
+                req.payloadlen = l;
+
+                iov[0].iov_base = &req;
+                iov[0].iov_len = sizeof(SessionRequest);
+
+                iov[1].iov_base = (void *)session;
+                iov[1].iov_len = l;
+
+                len = iov[0].iov_len + iov[1].iov_len;
+                n = writev( sock, iov, 2 );
                 if ( n != len )
                 {
                     result = EBADMSG;
                 }
                 else
                 {
-                    result = resp.responseCode;
-                    if ( result == EOK )
+                    len = sizeof( SessionResponse );
+                    n = read( sock, &resp, len );
+                    if ( n != len )
                     {
-                        *uid = resp.uid;
+                        result = EBADMSG;
+                    }
+                    else
+                    {
+                        result = resp.responseCode;
+                        if ( result == EOK )
+                        {
+                            *uid = resp.uid;
+                        }
                     }
                 }
             }
-        }
 
-        close( sock );
+            close( sock );
+        }
     }
 
     return result;

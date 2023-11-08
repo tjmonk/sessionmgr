@@ -245,16 +245,25 @@ static int HandleVarNotification( SessionMgrState *pState );
 static int HandleVarChanged( SessionMgrState *pState, VAR_HANDLE hVar );
 static int HandleClientRequest( SessionMgrState *pState, fd_set *read_fds );
 static int ReadClientRequest( SessionMgrState *pState, int fd );
+static int ReadBasicAuthRequest( int fd, BasicAuthRequest *bar );
+static int ReadSessionId( int fd,
+                          SessionRequest *pReq,
+                          char *session,
+                          size_t len );
+
 static int ProcessClientRequest( SessionMgrState *pState,
                                  SessionRequest *pRequest,
                                  int fd );
 static int ProcessRequestNewSession( SessionMgrState *pState,
+                                     int fd,
                                      SessionRequest *pReq,
                                      SessionResponse *pResp );
 static int ProcessRequestDeleteSession( SessionMgrState *pState,
+                                        int fd,
                                         SessionRequest *pReq,
                                         SessionResponse *pResp );
 static int ProcessRequestValidateSession( SessionMgrState *pState,
+                                          int fd,
                                           SessionRequest *pReq,
                                           SessionResponse *pResp );
 static int CheckPassword( const char* user,
@@ -263,11 +272,13 @@ static int CheckPassword( const char* user,
 static int SetupTimer( int s );
 static int HandlePrintRequest( SessionMgrState *pState, int32_t id );
 static SessionInfo *FindSession( SessionMgrState *pState,
-                                 SessionRequest *pReq );
+                                 char *username,
+                                 char *reference );
 static SessionInfo *FindSessionById( SessionMgrState *pState,
                                      char *pSessionId );
 static SessionInfo *NewSession( SessionMgrState *pState,
-                                SessionRequest *pReq );
+                                char *username,
+                                char *reference );
 
 static int GetSessionToken( char *buf, size_t len );
 static int CheckTimeout( SessionMgrState *pState );
@@ -1324,15 +1335,22 @@ static int ProcessClientRequest( SessionMgrState *pState,
             switch( pReq->type )
             {
                 case SESSION_REQUEST_NEW:
-                    result = ProcessRequestNewSession( pState, pReq, &resp );
+                    result = ProcessRequestNewSession( pState,
+                                                       fd,
+                                                       pReq,
+                                                       &resp );
                     break;
 
                 case SESSION_REQUEST_DELETE:
-                    result = ProcessRequestDeleteSession( pState, pReq, &resp );
+                    result = ProcessRequestDeleteSession( pState,
+                                                          fd,
+                                                          pReq,
+                                                          &resp );
                     break;
 
                 case SESSION_REQUEST_VALIDATE:
                     result = ProcessRequestValidateSession( pState,
+                                                            fd,
                                                             pReq,
                                                             &resp );
                     break;
@@ -1380,6 +1398,10 @@ static int ProcessClientRequest( SessionMgrState *pState,
             pointer to the Session Manager State
 
     @param[in]
+        fd
+            file descriptor to read the BasicAuthRequest from
+
+    @param[in]
         pReq
             pointer to the SessionRequest object
 
@@ -1392,65 +1414,114 @@ static int ProcessClientRequest( SessionMgrState *pState,
 
 ==============================================================================*/
 static int ProcessRequestNewSession( SessionMgrState *pState,
+                                     int fd,
                                      SessionRequest *pReq,
                                      SessionResponse *pResp )
 {
     int result = EINVAL;
     SessionInfo *pSessionInfo;
+    BasicAuthRequest bar;
     int rc;
     uid_t uid;
 
     if ( ( pState != NULL ) &&
          ( pReq != NULL ) &&
-         ( pResp != NULL ) )
+         ( pResp != NULL ) &&
+         ( fd != -1 ) )
     {
         memset( pResp, 0, sizeof( SessionResponse ));
 
-        result = EOK;
-
-        /* check if password is valid for the specified user */
-        rc = CheckPassword( pReq->username,
-                            pReq->password,
-                            &uid );
-        if ( rc == EOK )
+        result = ReadBasicAuthRequest( fd, &bar );
+        if ( result == EOK )
         {
-            /* see if a session for this user/clientref already exists */
-            pSessionInfo = FindSession( pState, pReq );
-            if ( pSessionInfo != NULL )
+            /* check if password is valid for the specified user */
+            rc = CheckPassword( bar.username,
+                                bar.password,
+                                &uid );
+            if ( rc == EOK )
             {
-                pResp->responseCode = EOK;
-
-                /* reset the timeout */
-                pSessionInfo->timeout = pState->sessionTimeout;
-
-                /* get the user id */
-                pSessionInfo->uid = uid;
-                pResp->uid = uid;
-
-                /* get the session id */
-                strcpy(pResp->sessionId, pSessionInfo->sessionId);
-            }
-            else
-            {
-                /* create a new session */
-                pSessionInfo = NewSession( pState, pReq );
+                /* see if a session for this user/clientref already exists */
+                pSessionInfo = FindSession( pState,
+                                            bar.username,
+                                            bar.reference );
                 if ( pSessionInfo != NULL )
                 {
                     pResp->responseCode = EOK;
+
+                    /* reset the timeout */
+                    pSessionInfo->timeout = pState->sessionTimeout;
+
+                    /* get the user id */
                     pSessionInfo->uid = uid;
                     pResp->uid = uid;
+
+                    /* get the session id */
                     strcpy(pResp->sessionId, pSessionInfo->sessionId);
                 }
                 else
                 {
-                    pResp->responseCode = EIO;
+                    /* create a new session */
+                    pSessionInfo = NewSession( pState,
+                                               bar.username,
+                                               bar.reference );
+                    if ( pSessionInfo != NULL )
+                    {
+                        pResp->responseCode = EOK;
+                        pSessionInfo->uid = uid;
+                        pResp->uid = uid;
+                        strcpy(pResp->sessionId, pSessionInfo->sessionId);
+                    }
+                    else
+                    {
+                        pResp->responseCode = EIO;
+                    }
                 }
             }
+            else
+            {
+                pResp->responseCode = EACCES;
+            }
+
         }
-        else
-        {
-            pResp->responseCode = EACCES;
-        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  ReadBasicAuthRequest                                                      */
+/*!
+    Read a BasicAuthRequest object from the client
+
+    The ReadBasicAuthRequest function reads a BasicAuthRequest object
+    from the client.
+
+    @param[in]
+        fd
+            file descriptor to read from
+
+    @param[in]
+        bar
+            pointer to the BasicAuthRequest object to populate
+
+
+    @retval EOK Basic Auth Request read successfully
+    @retval EBADMSG inappropriate message length
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int ReadBasicAuthRequest( int fd, BasicAuthRequest *bar )
+{
+    int result = EINVAL;
+    size_t len;
+    size_t n;
+
+    if ( ( bar != NULL ) &&
+         ( fd != -1 ) )
+    {
+        len = sizeof( BasicAuthRequest );
+        n = read( fd, bar, len );
+        result = ( n == len ) ? EOK : EBADMSG;
     }
 
     return result;
@@ -1469,6 +1540,10 @@ static int ProcessRequestNewSession( SessionMgrState *pState,
             pointer to the Session Manager State
 
     @param[in]
+        fd
+            file descriptor to read the session id from
+
+    @param[in]
         pReq
             pointer to the SessionRequest object
 
@@ -1481,25 +1556,34 @@ static int ProcessRequestNewSession( SessionMgrState *pState,
 
 ==============================================================================*/
 static int ProcessRequestDeleteSession( SessionMgrState *pState,
+                                        int fd,
                                         SessionRequest *pReq,
                                         SessionResponse *pResp )
 {
     int result = EINVAL;
     SessionInfo *pSessionInfo;
+    char sessionId[SESSION_ID_LEN+1];
 
     if ( ( pState != NULL ) &&
          ( pReq != NULL ) &&
-         ( pResp != NULL ) )
+         ( pResp != NULL ) &&
+         ( fd != -1 ) )
     {
-        result = EOK;
-
-        strcpy( pResp->sessionId, pReq->sessionId );
-
-        pSessionInfo = FindSessionById( pState, pReq->sessionId );
-        if ( pSessionInfo != NULL )
+        result = ReadSessionId( fd, pReq, sessionId, sizeof sessionId );
+        if ( result == EOK )
         {
-            DeleteSession( pState, pSessionInfo );
-            pResp->responseCode = EOK;
+            strcpy( pResp->sessionId, sessionId );
+
+            pSessionInfo = FindSessionById( pState, sessionId );
+            if ( pSessionInfo != NULL )
+            {
+                DeleteSession( pState, pSessionInfo );
+                pResp->responseCode = EOK;
+            }
+            else
+            {
+                pResp->responseCode = ENOENT;
+            }
         }
         else
         {
@@ -1523,6 +1607,10 @@ static int ProcessRequestDeleteSession( SessionMgrState *pState,
             pointer to the Session Manager State
 
     @param[in]
+        fd
+            file descriptor to read the session id from
+
+    @param[in]
         pReq
             pointer to the SessionRequest object
 
@@ -1535,11 +1623,13 @@ static int ProcessRequestDeleteSession( SessionMgrState *pState,
 
 ==============================================================================*/
 static int ProcessRequestValidateSession( SessionMgrState *pState,
+                                          int fd,
                                           SessionRequest *pReq,
                                           SessionResponse *pResp )
 {
     int result = EINVAL;
     SessionInfo *pSessionInfo;
+    char sessionId[SESSION_ID_LEN+1];
 
     if ( ( pState != NULL ) &&
          ( pReq != NULL ) &&
@@ -1547,26 +1637,92 @@ static int ProcessRequestValidateSession( SessionMgrState *pState,
     {
         memset( pResp, 0, sizeof( SessionResponse ));
 
-        result = EOK;
-
-        strcpy( pResp->sessionId, pReq->sessionId );
-
-        pSessionInfo = FindSessionById( pState, pReq->sessionId );
-        if ( pSessionInfo != NULL )
+        result = ReadSessionId( fd, pReq, sessionId, sizeof sessionId );
+        if ( result == EOK )
         {
-            pResp->responseCode = EOK;
+            strcpy( pResp->sessionId, sessionId );
 
-            if ( pState->autoextend == true )
+            pSessionInfo = FindSessionById( pState, sessionId );
+            if ( pSessionInfo != NULL )
             {
-                /* reset timeout back to its default value */
-                pSessionInfo->timeout = pState->sessionTimeout;
-            }
+                pResp->responseCode = EOK;
 
-            pResp->uid = pSessionInfo->uid;
+                if ( pState->autoextend == true )
+                {
+                    /* reset timeout back to its default value */
+                    pSessionInfo->timeout = pState->sessionTimeout;
+                }
+
+                pResp->uid = pSessionInfo->uid;
+            }
+            else
+            {
+                pResp->responseCode = EACCES;
+            }
         }
         else
         {
             pResp->responseCode = EACCES;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  ReadSessionId                                                             */
+/*!
+    Read a session identifier from the client
+
+    The ReadSessionId function reads a session identifier from
+    a client
+
+    @param[in]
+        fd
+            file descriptor to read from
+
+    @param[in]
+        pReq
+            pointer to the SessionRequest object which contains the
+            payload length to read
+
+    @param[in,out]
+        session
+            pointer to the location to store the session identifier
+
+    @param[in]
+        len
+            length of the buffer to store the session identifier
+
+    @retval EOK session identifier was read from the client
+    @retval EBADMSG invalid message length
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int ReadSessionId( int fd,
+                          SessionRequest *pReq,
+                          char *session,
+                          size_t len )
+{
+    int result = EINVAL;
+    size_t n;
+
+    if ( ( pReq != NULL ) &&
+         ( pReq->payloadlen < len ) &&
+         ( fd != -1 ) &&
+         ( session != NULL ) &&
+         ( len > 0 ) )
+    {
+        n = read( fd, session, pReq->payloadlen );
+        if ( n == pReq->payloadlen )
+        {
+            /* NUL terminate the session identifier */
+            session[n] = 0;
+            result = EOK;
+        }
+        else
+        {
+            result = EBADMSG;
         }
     }
 
@@ -1685,18 +1841,20 @@ static int CheckPassword( const char* user,
 
 ==============================================================================*/
 static SessionInfo *FindSession( SessionMgrState *pState,
-                                 SessionRequest *pReq )
+                                 char *username,
+                                 char *reference )
 {
     SessionInfo *pSession = NULL;
 
     if ( ( pState != NULL ) &&
-         ( pReq != NULL ) )
+         ( username != NULL ) &&
+         ( reference != NULL ) )
     {
         pSession = pState->pActiveSessions;
         while ( pSession != NULL )
         {
-            if ( ( strcmp( pReq->username, pSession->username ) == 0 ) &&
-                 ( strcmp( pReq->reference, pSession->reference ) == 0 ) )
+            if ( ( strcmp( username, pSession->username ) == 0 ) &&
+                 ( strcmp( reference, pSession->reference ) == 0 ) )
             {
                 break;
             }
@@ -1764,22 +1922,27 @@ static SessionInfo *FindSessionById( SessionMgrState *pState,
             pointer to the Session Manager state
 
     @param[in]
-        pReq
-            pointer to the Session Request object containing the username
-            and client reference
+        username
+            pointer to the user name for the new session
+
+    @param[in]
+        reference
+            pointer to the reference for the new session
 
     @retval pointer to the created SessionInfo object
     @retval NULL could not create the session
 
 ==============================================================================*/
 static SessionInfo *NewSession( SessionMgrState *pState,
-                                SessionRequest *pReq )
+                                char *username,
+                                char *reference )
 {
     SessionInfo *pSession = NULL;
     char sessionId[ SESSION_ID_LEN + 1 ];
 
     if ( ( pState != NULL ) &&
-         ( pReq != NULL ) )
+         ( username != NULL ) &&
+         ( reference != NULL ) )
     {
         /* generate a session token */
         if ( GetSessionToken( sessionId, SESSION_ID_LEN ) == EOK )
@@ -1802,8 +1965,8 @@ static SessionInfo *NewSession( SessionMgrState *pState,
             if ( pSession != NULL )
             {
                 /* copy the session username and client reference */
-                strcpy( pSession->username, pReq->username );
-                strcpy( pSession->reference, pReq->reference );
+                strcpy( pSession->username, username );
+                strcpy( pSession->reference, reference );
                 strcpy( pSession->sessionId, sessionId );
 
                 /* set the session timeout */
