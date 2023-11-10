@@ -86,9 +86,14 @@ will be used instead.
 |---|---|---|---|
 | Variable Name | Variable Description | Usage | Default Behavior |
 | /sys/session/info | Used to query a list of active sessions as a JSON object | | session info is unavailable |
-| /sys/session/enable | When set to 0 disable all current and future sessions |  0=disable 1=enable | session manager is enabled |
-| /sys/session/timeout | Session timeout for all future sessions | Timeout is specified in seconnds.  A session timeout of 0 will disable all automatic session termination, and sessions will persist forever unless explicitly terminated | Session timeout is 300 seconds
-| /sys/session/autoextend | Allow sessions to auto-extend whenever client activity is detected | 0=disable autoextend 1=enable autoextend.  | Sessions do not auto-extend |
+| /sys/session/cfg_enable | When set to 0 disable all current and future sessions |  0=disable 1=enable | session manager is enabled |
+| /sys/session/cfg_timeout | Session timeout for all future sessions | Timeout is specified in seconnds.  A session timeout of 0 will disable all automatic session termination, and sessions will persist forever unless explicitly terminated | Session timeout is 300 seconds
+| /sys/session/cfg_autoextend | Allow sessions to auto-extend whenever client activity is detected | 0=disable autoextend 1=enable autoextend.  | Sessions do not auto-extend |
+| /sys/session/cfg_audit | Enable/Disable session auditing | 0=disable auditing 1=enable auditing | Sessions are not audited by default |
+| /sys/session/cfg_audience | Expected audience for JWT bearer tokens | | audience is not specified by default |
+| /sys/session/cfg_issuer | Expected issuer for JWT bearer tokens | | issuer is not specified by default |
+| /sys/session/cfg_keystore | Specifies where JWT public keys are stored | | key store is not specified by default |
+| /sys/session/cfg_users | Comma separated list of valid JWT users (subjects) | | user list is empty by default |
 
 Variables can be changed at run-time and the changes will have immediate
 impact on the behavior of session manager.
@@ -171,6 +176,7 @@ The session utility supports the following command line options:
 | -u user | specify the login user name |
 | -p password | specify the login user password |
 | -r reference | specify the client reference |
+| -t token | specify a JWT bearer token |
 | -m mode | specify the operating mode: login, logout, or validate |
 | -s session | specify the session identifier |
 
