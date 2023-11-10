@@ -2775,7 +2775,7 @@ static int CheckAuthToken( SessionMgrState *pState,
             }
             else
             {
-                if ( pState->verbose )
+                if ( pState->verbose == true )
                 {
                     TJWT_PrintSections( jwt, STDERR_FILENO );
                     TJWT_PrintClaims( jwt, STDERR_FILENO );
