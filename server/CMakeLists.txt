@@ -26,6 +26,9 @@ target_link_libraries( ${PROJECT_NAME}
     sessionmgr
     varserver
     crypt
+    ssl
+    crypto
+    tjwt
 )
 
 set_target_properties( ${PROJECT_NAME}

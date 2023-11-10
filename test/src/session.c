@@ -81,6 +81,9 @@ typedef struct sessionState
     /*! password */
     char *password;
 
+    /*! JWT */
+    char *token;
+
     /*! client reference */
     char *clientref;
 
@@ -155,11 +158,22 @@ int main(int argc, char **argv)
     /* create a new session */
     if ( strcmp( state.mode, "login" ) == 0 )
     {
-        result = SESSIONMGR_NewSession( state.username,
-                                        state.password,
-                                        state.clientref,
-                                        session,
-                                        BUFSIZ );
+        if ( state.token != NULL )
+        {
+            result = SESSIONMGR_NewSessionFromToken( state.token,
+                                                     state.clientref,
+                                                     session,
+                                                     BUFSIZ );
+        }
+        else
+        {
+            result = SESSIONMGR_NewSession( state.username,
+                                            state.password,
+                                            state.clientref,
+                                            session,
+                                            BUFSIZ );
+        }
+
         if ( result == EOK )
         {
             printf("%s", session );
@@ -240,12 +254,14 @@ static void usage( char *cmdname )
     if( cmdname != NULL )
     {
         fprintf(stderr,
-                "usage: %s [-v] [-h] [-u user] [-p pass] [-r ref] [-m mode]\n"
+                "usage: %s [-v] [-h] [-u user] [-p pass] [-t token] [-r ref] "
+                "[-m mode]\n"
                 " [-v] : verbose mode\n"
                 " [-h] : display this help\n"
                 " [-m mode] : mode = login|logout\n"
                 " [-u user] : username\n"
                 " [-p pass] : password\n"
+                " [ -t token] : JWT\n"
                 " [-r ref] : unique client reference\n"
                 " [-s session] : session identifier\n",
                 cmdname );
@@ -280,7 +296,7 @@ static int ProcessOptions( int argC, char *argV[], SessionState *pState )
 {
     int c;
     int result = EINVAL;
-    const char *options = "vhu:p:r:s:m:";
+    const char *options = "vhu:p:r:s:m:t:";
 
     if( ( pState != NULL ) &&
         ( argV != NULL ) )
@@ -314,6 +330,10 @@ static int ProcessOptions( int argC, char *argV[], SessionState *pState )
 
                 case 's':
                     pState->session = optarg;
+                    break;
+
+                case 't':
+                    pState->token = optarg;
                     break;
 
                 case 'm':

@@ -58,6 +58,11 @@ SOFTWARE.
 #define SESSION_MAX_REFERENCE_LEN   128
 #endif
 
+#ifndef SESSION_MAX_TOKEN_LEN
+/*! maximum token length */
+#define SESSION_MAX_TOKEN_LEN       2048
+#endif
+
 #ifndef SESSION_MAX_RESPONSE_LEN
 /*! maximum session response length */
 #define SESSION_MAX_RESPONSE_LEN   128
@@ -94,7 +99,10 @@ typedef enum sessionRequestType
     SESSION_REQUEST_DELETE = 2,
 
     /*! validate session request */
-    SESSION_REQUEST_VALIDATE = 3
+    SESSION_REQUEST_VALIDATE = 3,
+
+    /*! new token session request */
+    SESSION_REQUEST_NEW_FROM_TOKEN = 4
 
 } SessionRequestType;
 
@@ -158,6 +166,16 @@ int SESSIONMGR_NewSession( char *username,
                            char *reference,
                            char *session,
                            size_t buflen );
+
+int SESSIONMGR_NewSessionFromToken( char *token,
+                                    char *reference,
+                                    char *session,
+                                    size_t buflen );
+
+int SESSIONMGR_NewTokenSession( char *token,
+                                char *reference,
+                                char *session,
+                                size_t buflen );
 
 int SESSIONMGR_EndSession( const char *session );
 

@@ -66,6 +66,7 @@ SOFTWARE.
 #include <syslog.h>
 #include <varserver/varserver.h>
 #include <sessionmgr/sessionmgr.h>
+#include <tjwt/tjwt.h>
 
 /*==============================================================================
         Private definitions
@@ -94,6 +95,22 @@ SOFTWARE.
 /*! name of variable to enable sesssion auditing */
 #ifndef SESSION_AUDIT_NAME
 #define SESSION_AUDIT_NAME "/sys/session/cfg_audit"
+#endif
+
+#ifndef SESSION_AUDIENCE_NAME
+#define SESSION_AUDIENCE_NAME "/sys/session/cfg_audience"
+#endif
+
+#ifndef SESSION_ISSUER_NAME
+#define SESSION_ISSUER_NAME  "/sys/session/cfg_issuer"
+#endif
+
+#ifndef SESSION_KEYSTORE_NAME
+#define SESSION_KEYSTORE_NAME "/sys/session/cfg_keystore"
+#endif
+
+#ifndef SESSION_USERLIST_NAME
+#define SESSION_USERLIST_NAME "/sys/session/cfg_users"
 #endif
 
 /*! timer notification */
@@ -144,6 +161,27 @@ typedef struct sessionInfo
 
 } SessionInfo;
 
+/*! The var type combines a variable handle and its object to
+    ease configuration management */
+typedef struct _vs_var
+{
+    /* handle to the variable */
+    VAR_HANDLE hdl;
+
+    /* variable value  */
+    VarObject obj;
+} var;
+
+/*! uint16 variable initialization */
+typedef struct _init_var16
+{
+    /*! pointer to the variable to be initialized */
+    var *pVar;
+
+    /* value to be initialized */
+    uint16_t val;
+} InitVar16;
+
 /*! Session Manager state */
 typedef struct sessionMgrState
 {
@@ -159,20 +197,32 @@ typedef struct sessionMgrState
     /*! connection socket to listen on for client connections */
     int sock;
 
-    /*! handle to the session info variable */
-    VAR_HANDLE hSessionInfo;
+    /*! session information rendered variable */
+    var sessionInfo;
 
-    /*! handle to the session manager enable variable */
-    VAR_HANDLE hSessionEnable;
+    /*! session manager enable variable */
+    var sessionEnable;
 
-    /*! handle to the session manager enable variable */
-    VAR_HANDLE hSessionTimeout;
+    /*! session timeout variable */
+    var sessionTimeout;
 
-    /*! handle to the autoextend variable */
-    VAR_HANDLE hAutoExtend;
+    /*! session autoextend variable */
+    var autoExtend;
 
-    /*! handle to the audit variable */
-    VAR_HANDLE hAudit;
+    /*! audit enable variable */
+    var audit;
+
+    /*! token key store */
+    var keystore;
+
+    /*! expected token issuer */
+    var issuer;
+
+    /*! expected token audience */
+    var audience;
+
+    /*! allowed user list */
+    var users;
 
     /*! set of sockets waiting to be read */
     fd_set read_fds;
@@ -195,18 +245,6 @@ typedef struct sessionMgrState
     /*! pointer to the active sessions */
     SessionInfo *pActiveSessions;
 
-    /*! session timeout */
-    uint16_t sessionTimeout;
-
-    /*! enable */
-    uint16_t enable;
-
-    /*! automatic extension of timeout on validation */
-    uint16_t autoextend;
-
-    /*! session auditing */
-    uint16_t audit;
-
 } SessionMgrState;
 
 /*! handle session configuration variables */
@@ -215,11 +253,8 @@ typedef struct session_vars
     /*! variable name */
     char *pName;
 
-    /*! pointer to the variable handle */
-    VAR_HANDLE *pVarHandle;
-
-    /*! pointer to the variable value */
-    uint16_t *pVal;
+    /*! pointer to the variable */
+    var *pVar;
 
     /*! type of notification */
     NotificationType notifyType;
@@ -258,6 +293,12 @@ static int ProcessRequestNewSession( SessionMgrState *pState,
                                      int fd,
                                      SessionRequest *pReq,
                                      SessionResponse *pResp );
+
+static int ProcessRequestNewSessionFromToken( SessionMgrState *pState,
+                                              int fd,
+                                              SessionRequest *pReq,
+                                              SessionResponse *pResp );
+
 static int ProcessRequestDeleteSession( SessionMgrState *pState,
                                         int fd,
                                         SessionRequest *pReq,
@@ -269,6 +310,8 @@ static int ProcessRequestValidateSession( SessionMgrState *pState,
 static int CheckPassword( const char* user,
                           const char* password,
                           uid_t *uid );
+static int CheckUser( SessionMgrState *pState, char *user );
+
 static int SetupTimer( int s );
 static int HandlePrintRequest( SessionMgrState *pState, int32_t id );
 static SessionInfo *FindSession( SessionMgrState *pState,
@@ -286,6 +329,23 @@ static void DeleteSession( SessionMgrState *pState, SessionInfo *pSessionInfo );
 static int DeleteAllSessions( SessionMgrState *pState );
 static int PrintSessions( SessionMgrState *pState, int fd );
 
+static int UpdateSession( SessionMgrState *pState,
+                          SessionResponse *pResp,
+                          char *username,
+                          char *reference,
+                          uid_t uid );
+
+static int CheckAuthToken( SessionMgrState *pState,
+                           char *token,
+                           uid_t *uid,
+                           char *username,
+                           size_t len );
+
+static int SetVar( var *pVar, uint16_t val );
+static size_t StrVarLen( var *pVar );
+static int AllocStrVar( var *pVar, size_t len );
+static int FreeStrVar( var *pVar );
+
 /*==============================================================================
         Private file scoped variables
 ==============================================================================*/
@@ -294,16 +354,15 @@ static SessionMgrState state;
 
 /*! session variables */
 static const SessionVars session_vars[] = {
-    {SESSION_INFO_NAME,
-        &state.hSessionInfo, NULL, NOTIFY_PRINT},
-    {SESSION_TIMEOUT_NAME,
-        &state.hSessionTimeout, &state.sessionTimeout, NOTIFY_MODIFIED},
-    {SESSION_AUTOEXTEND_NAME,
-        &state.hAutoExtend, &state.autoextend, NOTIFY_MODIFIED},
-    {SESSION_AUDIT_NAME,
-        &state.hAudit, &state.audit, NOTIFY_MODIFIED},
-    {SESSION_ENABLE_NAME,
-        &state.hSessionEnable, &state.enable, NOTIFY_MODIFIED}
+    {SESSION_INFO_NAME, &state.sessionInfo, NOTIFY_PRINT},
+    {SESSION_TIMEOUT_NAME, &state.sessionTimeout, NOTIFY_MODIFIED},
+    {SESSION_AUTOEXTEND_NAME, &state.autoExtend, NOTIFY_MODIFIED},
+    {SESSION_AUDIT_NAME, &state.audit, NOTIFY_MODIFIED},
+    {SESSION_ENABLE_NAME, &state.sessionEnable, NOTIFY_MODIFIED},
+    {SESSION_AUDIENCE_NAME, &state.audience, NOTIFY_MODIFIED},
+    {SESSION_ISSUER_NAME, &state.issuer, NOTIFY_MODIFIED},
+    {SESSION_KEYSTORE_NAME, &state.keystore, NOTIFY_MODIFIED},
+    {SESSION_USERLIST_NAME, &state.users, NOTIFY_MODIFIED}
 };
 
 /*==============================================================================
@@ -333,6 +392,24 @@ static const SessionVars session_vars[] = {
 int main(int argc, char **argv)
 {
     int result = EINVAL;
+    int i;
+    int len;
+
+    /* default variable values */
+    InitVar16 vars[] =
+    {
+        { &state.sessionEnable, 1 },
+        { &state.autoExtend, 0 },
+        { &state.audit, 0 },
+        { &state.sessionTimeout, DEFAULT_SESSION_TIMEOUT },
+        { &state.sessionInfo, 0 }
+    };
+
+    /* list of string variables to allocate */
+    var *strvars[] =
+    {
+        &state.issuer, &state.audience, &state.keystore, &state.users
+    };
 
     /* remove any previous session manager API endpoint */
     unlink( SESSION_MANAGER_NAME );
@@ -340,17 +417,19 @@ int main(int argc, char **argv)
     /* initialize the Session Manager State */
     memset( &state, 0, sizeof (SessionMgrState));
 
-    /* set default state to enabled */
-    state.enable = 1;
+    /* get length of variable initializers */
+    len = sizeof( vars ) / sizeof( vars[0] );
+    for ( i = 0; i < len ; i++ )
+    {
+        SetVar( vars[i].pVar, vars[i].val );
+    }
 
-    /* reset timeout on validate */
-    state.autoextend = 0;
-
-    /* disable auditing by default */
-    state.audit = 0;
-
-    /* set default session timeout */
-    state.sessionTimeout = DEFAULT_SESSION_TIMEOUT;
+    /* allocate config strings */
+    len = sizeof( strvars ) / sizeof( strvars[0] );
+    for ( i = 0 ; i < len ; i++ )
+    {
+        AllocStrVar( strvars[i], 256 );
+    }
 
     /* Process the command line options */
     ProcessOptions( argc, argv, &state );
@@ -375,6 +454,13 @@ int main(int argc, char **argv)
 
             unlink(SESSION_MANAGER_NAME);
         }
+    }
+
+    /* deallocate config strings */
+    len = sizeof( strvars ) / sizeof( strvars[0] );
+    for ( i = 0 ; i < len ; i++ )
+    {
+        FreeStrVar( strvars[i] );
     }
 
     return result == EOK ? 0 : 1;
@@ -575,6 +661,163 @@ static int SetupTimer( int s )
 }
 
 /*============================================================================*/
+/*  SetVar                                                                    */
+/*!
+    Set a variable value
+
+    The SetVar function sets a VARTYPE_UINT16 variable to the
+    specified value.
+
+    @param[in]
+        pVar
+            pointer to the var to set
+
+    @param[in]
+        val
+            value to set
+
+    @retval EOK the variable type, length and value were set
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int SetVar( var *pVar, uint16_t val )
+{
+    int result = EINVAL;
+
+    if ( pVar != NULL )
+    {
+        pVar->obj.type = VARTYPE_UINT16;
+        pVar->obj.len = sizeof( uint16_t );
+        pVar->obj.val.ui = val;
+        result = EOK;
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  StrVarLen                                                                 */
+/*!
+    Check the length of a string variable
+
+    The StrVarLen function calculates the length of the
+    specified string variable.  If the specified variable
+    is not a string variable, the function will return 0.
+
+    @param[in]
+        pVar
+            pointer to the var to calculate the length for
+
+    @retval length of the string variable
+    @retval 0 if the variable is not a string variable
+
+==============================================================================*/
+static size_t StrVarLen( var *pVar )
+{
+    size_t len = 0;
+
+    if ( ( pVar != NULL ) &&
+         ( pVar->obj.type == VARTYPE_STR ) &&
+         ( pVar->obj.val.str != NULL ) )
+    {
+        len = strlen( pVar->obj.val.str );
+    }
+
+    return len;
+}
+
+/*============================================================================*/
+/*  AllocStrVar                                                               */
+/*!
+    Allocate memory for a string variable
+
+    The AllocStrVar function sets up the specified variable as a
+    string variable and allocates memory for the string with the
+    specified length
+
+    @param[in]
+        pVar
+            pointer to the var to initialize
+
+    @param[in]
+        len
+            maximum length of the string (including NUL terminator)
+
+    @retval EOK string was allocated successfully
+    @retval ENOMEM memory allocation failed
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int AllocStrVar( var *pVar, size_t len )
+{
+    int result = EINVAL;
+
+    if ( pVar != NULL )
+    {
+        pVar->obj.type = VARTYPE_STR;
+        pVar->obj.val.str = calloc(1 , len );
+        if ( pVar->obj.val.str != NULL )
+        {
+            pVar->obj.len = len;
+            result = EOK;
+        }
+        else
+        {
+            result = ENOMEM;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  FreeStrVar                                                                */
+/*!
+    Free memory for a string variable
+
+    The FreeStrVar function deallocates the memory for the string
+    var that was allocated with AllocStrVar
+
+    @param[in]
+        pVar
+            pointer to the string var to deallocate
+
+    @param[in]
+        len
+            maximum length of the string (including NUL terminator)
+
+    @retval EOK string was allocated successfully
+    @retval ENOTSUP not a string variable
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int FreeStrVar( var *pVar )
+{
+    int result = EINVAL;
+
+    if ( pVar != NULL )
+    {
+        if ( pVar->obj.type == VARTYPE_STR )
+        {
+            if ( pVar->obj.val.str != NULL )
+            {
+                free( pVar->obj.val.str );
+                pVar->obj.val.str = NULL;
+                pVar->obj.len = 0;
+            }
+
+            result = EOK;
+        }
+        else
+        {
+            result = ENOTSUP;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
 /*  SessionMgrInit                                                            */
 /*!
     Initialize the session manager
@@ -653,12 +896,10 @@ static int SetupNotifications( SessionMgrState *pState )
 {
     int result = EINVAL;
     int rc;
-    VarObject varobj;
     size_t n = sizeof session_vars / sizeof session_vars[0];
     size_t i;
-    VAR_HANDLE *pVarHandle;
     char *pName;
-    uint16_t *pVal;
+    var *pVar;
     NotificationType notifyType;
 
     if ( pState != NULL )
@@ -668,37 +909,31 @@ static int SetupNotifications( SessionMgrState *pState )
 
         for ( i = 0; i < n ; i++ )
         {
-            pVarHandle = session_vars[i].pVarHandle;
             pName = session_vars[i].pName;
-            pVal = session_vars[i].pVal;
+            pVar = session_vars[i].pVar;
             notifyType = session_vars[i].notifyType;
 
-            if ( ( pVarHandle != NULL ) &&
+            if ( ( pVar != NULL ) &&
                  ( pName != NULL ) )
             {
                 /* get variable reference */
-                *pVarHandle = VAR_FindByName( pState->hVarServer, pName );
-                if ( *pVarHandle != VAR_INVALID )
+                pVar->hdl = VAR_FindByName( pState->hVarServer, pName );
+                if ( pVar->hdl != VAR_INVALID )
                 {
                     /* get initial value */
-                    if ( pVal != NULL )
+                    rc = VAR_Get( pState->hVarServer,
+                                  pVar->hdl,
+                                  &pVar->obj );
+                    if ( rc != EOK )
                     {
-                        rc = VAR_Get( pState->hVarServer, *pVarHandle, &varobj);
-                        if ( rc == EOK )
-                        {
-                            *pVal = varobj.val.ui;
-                        }
-                        else
-                        {
-                            result = rc;
-                        }
+                        result = rc;
                     }
 
                     /* set up notifications */
                     if ( notifyType != NOTIFY_NONE )
                     {
                         rc = VAR_Notify( pState->hVarServer,
-                                         *pVarHandle,
+                                         pVar->hdl,
                                          notifyType );
                         if ( rc != EOK )
                         {
@@ -1097,38 +1332,32 @@ static int HandleVarNotification( SessionMgrState *pState )
 static int HandleVarChanged( SessionMgrState *pState, VAR_HANDLE hVar )
 {
     int result = EINVAL;
-    VarObject varobj;
     size_t n = sizeof session_vars / sizeof session_vars[0];
     size_t i;
-    VAR_HANDLE *pVarHandle;
-    uint16_t *pVal;
+    var *pVar;
 
     if ( pState != NULL )
     {
-        /* get the changed value */
-        result = VAR_Get( pState->hVarServer, hVar, &varobj );
-        if ( result == EOK )
+        for ( i = 0; i < n; i++ )
         {
-            for ( i = 0; i < n; i++ )
+            pVar = session_vars[i].pVar;
+            if ( pVar != NULL )
             {
-                pVarHandle = session_vars[i].pVarHandle;
-                pVal = session_vars[i].pVal;
-
-                if ( ( pVarHandle != NULL ) &&
-                     ( pVal != NULL ) )
+                if ( pVar->hdl == hVar )
                 {
-                    if ( hVar == *pVarHandle )
-                    {
-                        *pVal = varobj.val.ui;
-                    }
+                    /* get the changed value */
+                    result = VAR_Get( pState->hVarServer,
+                                      hVar,
+                                      &pVar->obj );
+                    break;
                 }
             }
+        }
 
-            if ( ( hVar == pState->hSessionEnable ) &&
-                 ( pState->enable == 0 ) )
-            {
-                result = DeleteAllSessions( pState );
-            }
+        if ( ( hVar == pState->sessionEnable.hdl ) &&
+             ( pState->sessionEnable.obj.val.ui == 0 ) )
+        {
+            result = DeleteAllSessions( pState );
         }
     }
 
@@ -1171,7 +1400,7 @@ static int HandlePrintRequest( SessionMgrState *pState, int32_t id )
         {
             result = ENOENT;
 
-            if ( hVar == pState->hSessionInfo )
+            if ( hVar == pState->sessionInfo.hdl )
             {
                 PrintSessions( pState, fd );
             }
@@ -1330,7 +1559,7 @@ static int ProcessClientRequest( SessionMgrState *pState,
     {
         memset( &resp, 0, sizeof( SessionResponse ) );
 
-        if ( pState->enable == true )
+        if ( pState->sessionEnable.obj.val.ui != 0 )
         {
             switch( pReq->type )
             {
@@ -1339,6 +1568,13 @@ static int ProcessClientRequest( SessionMgrState *pState,
                                                        fd,
                                                        pReq,
                                                        &resp );
+                    break;
+
+                case SESSION_REQUEST_NEW_FROM_TOKEN:
+                    result = ProcessRequestNewSessionFromToken( pState,
+                                                                fd,
+                                                                pReq,
+                                                                &resp );
                     break;
 
                 case SESSION_REQUEST_DELETE:
@@ -1419,7 +1655,6 @@ static int ProcessRequestNewSession( SessionMgrState *pState,
                                      SessionResponse *pResp )
 {
     int result = EINVAL;
-    SessionInfo *pSessionInfo;
     BasicAuthRequest bar;
     int rc;
     uid_t uid;
@@ -1434,54 +1669,214 @@ static int ProcessRequestNewSession( SessionMgrState *pState,
         result = ReadBasicAuthRequest( fd, &bar );
         if ( result == EOK )
         {
-            /* check if password is valid for the specified user */
-            rc = CheckPassword( bar.username,
-                                bar.password,
-                                &uid );
-            if ( rc == EOK )
+            /* see if the user in the user list */
+            if ( CheckUser( pState, bar.username ) == EOK )
             {
-                /* see if a session for this user/clientref already exists */
-                pSessionInfo = FindSession( pState,
-                                            bar.username,
-                                            bar.reference );
-                if ( pSessionInfo != NULL )
+                /* check if password is valid for the specified user */
+                rc = CheckPassword( bar.username,
+                                    bar.password,
+                                    &uid );
+                if ( rc == EOK )
                 {
-                    pResp->responseCode = EOK;
-
-                    /* reset the timeout */
-                    pSessionInfo->timeout = pState->sessionTimeout;
-
-                    /* get the user id */
-                    pSessionInfo->uid = uid;
-                    pResp->uid = uid;
-
-                    /* get the session id */
-                    strcpy(pResp->sessionId, pSessionInfo->sessionId);
+                    /* create or update a session */
+                    result = UpdateSession( pState,
+                                            pResp,
+                                            bar.username,
+                                            bar.reference,
+                                            uid );
                 }
                 else
                 {
-                    /* create a new session */
-                    pSessionInfo = NewSession( pState,
-                                               bar.username,
-                                               bar.reference );
-                    if ( pSessionInfo != NULL )
-                    {
-                        pResp->responseCode = EOK;
-                        pSessionInfo->uid = uid;
-                        pResp->uid = uid;
-                        strcpy(pResp->sessionId, pSessionInfo->sessionId);
-                    }
-                    else
-                    {
-                        pResp->responseCode = EIO;
-                    }
+                    pResp->responseCode = EACCES;
                 }
             }
             else
             {
                 pResp->responseCode = EACCES;
             }
+        }
+    }
 
+    return result;
+}
+
+/*============================================================================*/
+/*  ProcessRequestNewSession                                                  */
+/*!
+    Process a client NewSession request
+
+    The ProcessRequestNewSession function processes a NewSession request
+    for the specified client.
+
+    @param[in]
+        pState
+            pointer to the Session Manager State
+
+    @param[in]
+        fd
+            file descriptor to read the reference and token from
+
+    @param[in]
+        pReq
+            pointer to the SessionRequest object
+
+    @param[in,out]
+        pResp
+            pointer to the SessionResponse object
+
+    @retval EOK client request handled successfully
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int ProcessRequestNewSessionFromToken( SessionMgrState *pState,
+                                              int fd,
+                                              SessionRequest *pReq,
+                                              SessionResponse *pResp )
+{
+    int result = EINVAL;
+    int rc;
+    char sessionref[SESSION_MAX_REFERENCE_LEN+1];
+    char token[SESSION_MAX_TOKEN_LEN+1];
+    char username[SESSION_MAX_USERNAME_LEN+1];
+
+    size_t len;
+    size_t n;
+    uid_t uid;
+
+    if ( ( pState != NULL ) &&
+         ( pReq != NULL ) &&
+         ( pResp != NULL ) &&
+         ( fd != -1 ) )
+    {
+        memset( pResp, 0, sizeof( SessionResponse ));
+
+        len = sizeof sessionref;
+        n = read( fd, sessionref, len );
+        if ( n == len )
+        {
+            len = sizeof token;
+            if ( pReq->payloadlen < len )
+            {
+                len = pReq->payloadlen;
+                n = read( fd, token, len );
+                if ( n == len )
+                {
+                    result = EOK;
+                }
+                else
+                {
+                    result = EBADMSG;
+                }
+            }
+        }
+
+        if ( result == EOK )
+        {
+            // to do - token validation
+            rc = CheckAuthToken( pState,
+                                 token,
+                                 &uid,
+                                 username,
+                                 sizeof username );
+            if ( rc == EOK )
+            {
+                /* create or update a session */
+                result = UpdateSession( pState,
+                                        pResp,
+                                        username,
+                                        sessionref,
+                                        uid );
+
+            }
+            else
+            {
+                pResp->responseCode = EACCES;
+            }
+        }
+        else
+        {
+            pResp->responseCode = EACCES;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  UpdateSession                                                             */
+/*!
+    Update or Add a new session
+
+    The UpdateSession function either refreshes an existing session or
+    creates a new session for the given username/reference.
+
+    @param[in]
+        pState
+            pointer to the Session Manager State
+
+    @param[in,out]
+        pResp
+            pointer to the SessionResponse object
+
+    @param[in]
+        username
+            pointer to the name of the user to add/update
+
+    @param[in]
+        reference
+            pointer to the name of the reference to add/update
+
+    @retval EOK client request handled successfully
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+static int UpdateSession( SessionMgrState *pState,
+                          SessionResponse *pResp,
+                          char *username,
+                          char *reference,
+                          uid_t uid )
+{
+    int result = EINVAL;
+    SessionInfo *pSessionInfo;
+
+    if ( ( pState != NULL ) &&
+         ( pResp != NULL ) &&
+         ( username != NULL ) &&
+         ( reference != NULL ) )
+    {
+        result = EOK;
+
+        /* see if a session for this user/clientref already exists */
+        pSessionInfo = FindSession( pState, username, reference );
+        if ( pSessionInfo != NULL )
+        {
+            pResp->responseCode = EOK;
+
+            /* reset the timeout */
+            pSessionInfo->timeout = pState->sessionTimeout.obj.val.ui;
+
+            /* get the user id */
+            pSessionInfo->uid = uid;
+            pResp->uid = uid;
+
+            /* get the session id */
+            strcpy(pResp->sessionId, pSessionInfo->sessionId);
+        }
+        else
+        {
+            /* create a new session */
+            pSessionInfo = NewSession( pState, username, reference );
+            if ( pSessionInfo != NULL )
+            {
+                pResp->responseCode = EOK;
+                pSessionInfo->uid = uid;
+                pResp->uid = uid;
+                strcpy(pResp->sessionId, pSessionInfo->sessionId);
+            }
+            else
+            {
+                pResp->responseCode = EIO;
+            }
         }
     }
 
@@ -1647,10 +2042,10 @@ static int ProcessRequestValidateSession( SessionMgrState *pState,
             {
                 pResp->responseCode = EOK;
 
-                if ( pState->autoextend == true )
+                if ( pState->autoExtend.obj.val.ui != 0 )
                 {
                     /* reset timeout back to its default value */
-                    pSessionInfo->timeout = pState->sessionTimeout;
+                    pSessionInfo->timeout = pState->sessionTimeout.obj.val.ui;
                 }
 
                 pResp->uid = pSessionInfo->uid;
@@ -1970,13 +2365,13 @@ static SessionInfo *NewSession( SessionMgrState *pState,
                 strcpy( pSession->sessionId, sessionId );
 
                 /* set the session timeout */
-                pSession->timeout = pState->sessionTimeout;
+                pSession->timeout = pState->sessionTimeout.obj.val.ui;
 
                 /* add the new session to the head of the active session list */
                 pSession->pNext = pState->pActiveSessions;
                 pState->pActiveSessions = pSession;
 
-                if ( pState->audit != 0 )
+                if ( pState->audit.obj.val.ui != 0 )
                 {
                     syslog( LOG_INFO,
                             "NewSession: %s/%s (%8.8s)",
@@ -2072,7 +2467,7 @@ static int CheckTimeout( SessionMgrState *pState )
     {
         result = EOK;
 
-        if ( pState->sessionTimeout != 0 )
+        if ( pState->sessionTimeout.obj.val.ui != 0 )
         {
             pSessionInfo = pState->pActiveSessions;
             while( pSessionInfo != NULL )
@@ -2151,7 +2546,7 @@ static void DeleteSession( SessionMgrState *pState, SessionInfo *pSessionInfo )
             pSessionInfo->pNext = pState->pFreeSessions;
             pState->pFreeSessions = pSessionInfo;
 
-            if ( pState->audit != 0 )
+            if ( pState->audit.obj.val.ui != 0 )
             {
                 syslog( LOG_INFO,
                         "Session %s:%s terminated",
@@ -2200,7 +2595,7 @@ static int DeleteAllSessions( SessionMgrState *pState )
         /* clear the active list */
         pState->pActiveSessions = NULL;
 
-        if ( pState->audit != 0 )
+        if ( pState->audit.obj.val.ui != 0 )
         {
             syslog( LOG_INFO, "All sessions deleted" );
         }
@@ -2266,6 +2661,200 @@ static int PrintSessions( SessionMgrState *pState, int fd )
         }
 
         dprintf( fd, "]");
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  CheckAuthToken                                                            */
+/*!
+    Check the validity of the authentication token
+
+    The CheckAuthToken function checks the validity of the authentication
+    token and retrieves its associated user.
+
+    @param[in]
+        pState
+            pointer to the Session Manager state
+
+    @param[in]
+        token
+            pointer to the authentication token
+
+    @param[in]
+        uid
+            pointer to a location to store the user identifier
+
+    @param[in]
+        username
+            pointer to a buffer to store the username
+
+    @param[in]
+        len
+            maximum allowed length of the username
+
+    @retval EOK - user authenticated
+    @retval EINVAL - invalid arguments
+    @retval EACCES - access denied
+
+==============================================================================*/
+static int CheckAuthToken( SessionMgrState *pState,
+                           char *token,
+                           uid_t *uid,
+                           char *username,
+                           size_t len )
+{
+    int result = EINVAL;
+    TJWT *jwt;
+    int64_t now = time( NULL );
+    JWTClaims *claims = NULL;
+    struct passwd *passwordEntry = NULL;
+    size_t l;
+
+    if ( ( pState != NULL ) &&
+         ( token != NULL ) &&
+         ( username != NULL ) &&
+         ( len > 0 ) &&
+         ( uid != NULL ) )
+    {
+        /* assume access is denied until we know otherwise */
+        result = EACCES;
+
+        jwt = TJWT_Init();
+        if ( jwt != NULL )
+        {
+            /* set the key store where we look for public validation keys */
+            if ( StrVarLen( &pState->keystore ) != 0 )
+            {
+                TJWT_SetKeyStore( jwt, pState->keystore.obj.val.str );
+            }
+
+            if ( StrVarLen( &pState->issuer ) != 0 )
+            {
+                /* expect a specific issuer */
+                TJWT_ExpectIssuer( jwt, pState->issuer.obj.val.str );
+            }
+
+            if ( StrVarLen( &pState->audience ) != 0 )
+            {
+                /* expect a specific audience */
+                TJWT_ExpectAudience( jwt, pState->audience.obj.val.str );
+            }
+
+            if ( TJWT_Validate( jwt, now, token ) == EOK )
+            {
+                claims = TJWT_GetClaims( jwt );
+                if ( ( claims != NULL ) &&
+                     ( claims->sub != NULL ) )
+                {
+                    /* username is stored in JWT subject */
+                    /* check if user is in the users list */
+                    if ( CheckUser( pState, claims->sub ) == EOK )
+                    {
+                        /* check if user exists */
+                        passwordEntry = getpwnam( claims->sub );
+                        if ( passwordEntry != NULL )
+                        {
+                            /* check username length */
+                            l = strlen( claims->sub );
+                            if ( l < len )
+                            {
+                                /* copy username to caller */
+                                strcpy( username, claims->sub );
+
+                                /* set user id */
+                                *uid = passwordEntry->pw_uid;
+
+                                /* access is allowed! */
+                                result = EOK;
+                            }
+                        }
+                    }
+                }
+            }
+            else
+            {
+                if ( pState->verbose )
+                {
+                    TJWT_PrintSections( jwt, STDERR_FILENO );
+                    TJWT_PrintClaims( jwt, STDERR_FILENO );
+                    TJWT_OutputErrors( jwt, STDERR_FILENO );
+                }
+
+                result = EACCES;
+            }
+
+            TJWT_Free( jwt );
+        }
+        else
+        {
+            result = EACCES;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  CheckUser                                                                 */
+/*!
+    Check if the specified user is in the user list
+
+    The CheckUser function checks if the specified user is found within
+    the user list
+
+    @param[in]
+        pState
+            pointer to the Session Manager state
+
+    @param[in]
+        user
+            pointer to the user to search for
+
+    @retval EOK - user found
+    @retval EINVAL - invalid arguments
+    @retval EACCES - access denied
+
+==============================================================================*/
+static int CheckUser( SessionMgrState *pState, char *user )
+{
+    int result = EINVAL;
+    char buf[BUFSIZ];
+    size_t len;
+    char *save;
+    char *pUser;
+
+    if ( ( pState != NULL ) &&
+         ( user != NULL ) )
+    {
+        /* assume user is not allowed until they are */
+        result = EACCES;
+
+        /* check if user is allowed */
+        len = StrVarLen( &pState->users );
+        if ( ( len != 0 ) &&
+             ( len < sizeof buf ) )
+        {
+            /* copy the user list into a working buffer so we can
+               split it on the comma delimiter */
+            strcpy( buf, pState->users.obj.val.str );
+
+            /* iterate through each user in the user list and
+               see if it matches the requested user */
+            for (pUser = strtok_r(buf, ",", &save);
+                pUser != NULL;
+                pUser = strtok_r(NULL, ",", &save))
+            {
+                /* check for user match */
+                if ( strcmp( pUser, user ) == 0 )
+                {
+                    /* matching user found */
+                    result = EOK;
+                    break;
+                }
+            }
+        }
     }
 
     return result;

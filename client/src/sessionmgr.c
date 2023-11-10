@@ -227,6 +227,116 @@ static int sendBasicAuthRequest( int sock, BasicAuthRequest *bar )
 }
 
 /*============================================================================*/
+/*  SESSIONMGR_NewSessionFromToken                                            */
+/*!
+    Create a new session from a bearer token
+
+    The SESSIONMGR_NewSessionFromToken requests the creation of a new
+    session from the session manager using a bearer token for
+    authentication.
+
+    @param[in]
+        token
+            pointer to the bearer token to use for authentication
+
+    @param[in]
+        reference
+            a client reference such as an IP address or other unique
+            client indicator.  This allows two distinct logins of
+            the same user from different locations.
+
+    @param[in,out]
+        session
+            pointer to a location to store the created session identifier
+
+    @param[in,out]
+        buflen
+            length of the buffer to store the created session identifier
+
+    @retval EOK session created successfully
+    @retval EINVAL invalid arguments
+
+==============================================================================*/
+int SESSIONMGR_NewSessionFromToken( char *token,
+                                    char *reference,
+                                    char *session,
+                                    size_t buflen )
+{
+    int sock;
+    struct iovec iov[3];
+    char sessionref[SESSION_MAX_REFERENCE_LEN+1];
+    size_t l;
+    ssize_t len;
+    ssize_t n;
+    SessionRequest req;
+    SessionResponse resp;
+    int result = EINVAL;
+
+    if ( ( token != NULL ) &&
+         ( reference != NULL ) &&
+         ( session != NULL ) &&
+         ( buflen > SESSION_ID_LEN ) )
+    {
+        result = ECONNREFUSED;
+
+        l = strlen( token ) + 1;
+        if ( l <= SESSION_MAX_TOKEN_LEN )
+        {
+            sock = sessionmgr_Connect();
+            if( sock >= 0 )
+            {
+                strncpy( sessionref,
+                         reference,
+                         SESSION_MAX_REFERENCE_LEN );
+                sessionref[SESSION_MAX_REFERENCE_LEN] = 0;
+
+                req.id = SESSION_MANAGER_ID;
+                req.version = SESSION_MANAGER_VERSION;
+                req.type = SESSION_REQUEST_NEW_FROM_TOKEN;
+                req.payloadlen = l;
+
+                iov[0].iov_base = &req;
+                iov[0].iov_len = sizeof(SessionRequest);
+
+                iov[1].iov_base = sessionref;
+                iov[1].iov_len = sizeof(sessionref);
+
+                iov[2].iov_base = token;
+                iov[2].iov_len = req.payloadlen;
+
+                len = iov[0].iov_len + iov[1].iov_len + iov[2].iov_len;
+                n = writev( sock, iov, 3);
+                result = ( n == len ) ? EOK : EBADMSG;
+                if ( result == EOK )
+                {
+                    len = sizeof( SessionResponse );
+                    n = read( sock, &resp, len );
+                    if ( n != len )
+                    {
+                        result = EBADMSG;
+                    }
+                    else
+                    {
+                        if ( resp.responseCode == EOK )
+                        {
+                            strncpy( session, resp.sessionId, buflen );
+                            session[buflen-1] = 0;
+                        }
+
+                        result = resp.responseCode;
+                    }
+                }
+            }
+
+            close( sock );
+        }
+    }
+
+    return result;
+
+}
+
+/*============================================================================*/
 /*  SESSIONMGR_EndSession                                                     */
 /*!
     Terminate a session
