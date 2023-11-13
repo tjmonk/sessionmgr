@@ -65,6 +65,14 @@ jobs:
       run: |
         ./build.sh
 
+    - uses: actions/checkout@v4
+      with:
+        repository: tjmonk/libtjwt
+
+    - name: Build TJWT library
+      run: |
+        ./build.sh
+
     - name: Checkout repository
       uses: actions/checkout@v3
 
