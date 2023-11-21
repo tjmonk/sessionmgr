@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-set(SESSIONMGR_VERSION 0.1)
+set(SESSIONMGR_VERSION 0.5)
 
 # set the project name
 project(sessionmgr
