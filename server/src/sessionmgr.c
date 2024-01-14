@@ -945,7 +945,7 @@ static int SetupNotifications( SessionMgrState *pState )
         }
 
         /* get a file descriptor to receive varserver signals on */
-        pState->varserver_fd = VARSERVER_Signalfd();
+        pState->varserver_fd = VARSERVER_Signalfd( 0 );
         if ( pState->varserver_fd > 0 )
         {
             FD_SET( pState->varserver_fd, &pState->read_fds );
