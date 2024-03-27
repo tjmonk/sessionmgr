@@ -463,6 +463,15 @@ int main(int argc, char **argv)
         FreeStrVar( strvars[i] );
     }
 
+    /* close connection to varserver */
+    if ( state.hVarServer != NULL )
+    {
+        if ( VARSERVER_Close( state.hVarServer ) == EOK )
+        {
+            state.hVarServer = NULL;
+        }
+    }
+
     return result == EOK ? 0 : 1;
 }
 
@@ -603,7 +612,10 @@ static void TerminationHandler( int signum, siginfo_t *info, void *ptr )
     (void)ptr;
 
     syslog( LOG_ERR, "Abnormal termination of Session Manager\n" );
-    VARSERVER_Close( state.hVarServer );
+    if ( VARSERVER_Close( state.hVarServer ) == EOK )
+    {
+        state.hVarServer = NULL;
+    }
 
     unlink(SESSION_MANAGER_NAME);
 
