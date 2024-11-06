@@ -18,7 +18,10 @@ set_target_properties( ${PROJECT_NAME} PROPERTIES
 	SOVERSION 1
 )
 
-target_link_libraries( ${PROJECT_NAME} rt )
+target_link_libraries( ${PROJECT_NAME}
+	rt
+	varserver
+)
 
 set(SESSIONMGR_HEADERS
     inc/sessionmgr/sessionmgr.h
