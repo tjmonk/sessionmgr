@@ -113,6 +113,14 @@ SOFTWARE.
 #define SESSION_USERLIST_NAME "/sys/session/cfg_users"
 #endif
 
+#ifndef SESSION_LOGOUT_EVENT_NAME
+#define SESSION_LOGOUT_EVENT_NAME "/sys/session/evt_logout"
+#endif
+
+#ifndef SESSION_LAST_LOGOUT_EVENT_NAME
+#define SESSION_LAST_LOGOUT_EVENT_NAME "/sys/session/evt_last_logout"
+#endif
+
 /*! timer notification */
 #define TIMER_NOTIFICATION SIGRTMIN+5
 
@@ -244,6 +252,15 @@ typedef struct sessionMgrState
 
     /*! pointer to the active sessions */
     SessionInfo *pActiveSessions;
+
+    /*! handle to the logout event variable */
+    VAR_HANDLE hLogoutEvt;
+
+    /*! handle to the 'last logout' event variable */
+    VAR_HANDLE hLastLogoutEvt;
+
+    /*! count the number of active sessions */
+    uint32_t sessionCount;
 
 } SessionMgrState;
 
@@ -439,6 +456,13 @@ int main(int argc, char **argv)
 
     /* get a handle to the variable server */
     state.hVarServer = VARSERVER_Open();
+
+    /* get handles to logout event variables */
+    state.hLogoutEvt = VAR_FindByName( state.hVarServer,
+                                       SESSION_LOGOUT_EVENT_NAME );
+
+    state.hLastLogoutEvt = VAR_FindByName( state.hVarServer,
+                                           SESSION_LAST_LOGOUT_EVENT_NAME );
 
     /* set up varserver notifications */
     if ( SetupNotifications( &state ) == EOK )
@@ -2383,6 +2407,9 @@ static SessionInfo *NewSession( SessionMgrState *pState,
                 pSession->pNext = pState->pActiveSessions;
                 pState->pActiveSessions = pSession;
 
+                /* increment the session counter */
+                pState->sessionCount++;
+
                 if ( pState->audit.obj.val.ui != 0 )
                 {
                     syslog( LOG_INFO,
@@ -2522,10 +2549,14 @@ static void DeleteSession( SessionMgrState *pState, SessionInfo *pSessionInfo )
     SessionInfo *p;
     SessionInfo *pLast = NULL;
     bool found = false;
+    VarObject trigger_obj;
 
     if ( ( pState != NULL ) &&
          ( pSessionInfo != NULL ) )
     {
+        trigger_obj.type = VARTYPE_UINT16;
+        trigger_obj.val.ui = 1;
+
         if ( pSessionInfo == pState->pActiveSessions )
         {
             pState->pActiveSessions = pSessionInfo->pNext;
@@ -2558,8 +2589,26 @@ static void DeleteSession( SessionMgrState *pState, SessionInfo *pSessionInfo )
             pSessionInfo->pNext = pState->pFreeSessions;
             pState->pFreeSessions = pSessionInfo;
 
+            /* generate logout event */
+            VAR_Set( pState->hVarServer, pState->hLogoutEvt, &trigger_obj );
+
+            /* update the session counter */
+            if ( pState->sessionCount > 0 )
+            {
+                pState->sessionCount--;
+            }
+
+            if ( pState->sessionCount == 0 )
+            {
+                /* generate last logout event */
+                VAR_Set( pState->hVarServer,
+                         pState->hLastLogoutEvt,
+                         &trigger_obj );
+            }
+
             if ( pState->audit.obj.val.ui != 0 )
             {
+
                 syslog( LOG_INFO,
                         "Session %s:%s terminated",
                         pSessionInfo->username,
