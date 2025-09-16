@@ -582,25 +582,25 @@ char *SESSIONMGR_GetSessionFromCookie( const char *cookie,
         if ( p != NULL )
         {
             p += 8;
-        }
 
-        start = p;
-        p = strchr(start, ';');
-        if ( p != NULL )
-        {
-            l = p - start;
-        }
-        else
-        {
-            l = strlen( start );
-        }
+            start = p;
+            p = strchr(start, ';');
+            if ( p != NULL )
+            {
+                l = p - start;
+            }
+            else
+            {
+                l = strlen( start );
+            }
 
-        if ( l < len )
-        {
-            memcpy( session, start, l );
-            session[l] = 0;
+            if ( l < len )
+            {
+                memcpy( session, start, l );
+                session[l] = 0;
 
-            result = session;
+                result = session;
+            }
         }
     }
 
